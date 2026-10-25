@@ -3,6 +3,8 @@
 
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { createBiliApi, findVideoId, parseCookie } from './api.js'
+import { lookWithVision, visionState } from './vision.js'
+import { createShotStore, shotPath, clockOf } from './shots.js'
 
 // 这些错误说明今天别再发了：没登录 / Cookie 过期、csrf 不对、风控、要验证码、太频繁
 const PAUSE_CODES = { '-101': 'B 站没登录或 Cookie 过期了', '-111': 'Cookie 里的 bili_jct 不对', '-352': '被 B 站风控了', '-509': '发得太频繁', '12015': 'B 站要求验证码' }
@@ -24,19 +26,23 @@ export function filterVideos(list, { minViews = 0, maxAgeDays = 0, seen = new Se
   return (list || []).filter((v) => v.bvid && !seen.has(v.bvid) && (v.play || 0) >= minViews && (!maxAgeDays || !v.pubdate || now - v.pubdate <= maxAgeDays * 86400_000))
 }
 
-/** 一个视频交给她看的样子（标题、UP 主、简介、字幕节选、热评）。 */
-export function digestOf(v, { subtitle = '', comments = [] } = {}) {
+/** 一个视频交给她看的样子（标题、UP 主、简介、字幕节选、画面描述、热评）。 */
+export function digestOf(v, { subtitle = '', comments = [], vision = '' } = {}) {
   return [
     `《${v.title}》 UP主：${v.author || '?'}  播放 ${v.play || 0}${v.tname ? '  分区：' + v.tname : ''}  ${v.bvid}`,
     v.desc ? `简介：${v.desc.slice(0, 300)}` : '',
-    subtitle ? `字幕（节选）：${subtitle.slice(0, 2500)}` : '（没有字幕，只能看标题、简介和评论）',
+    subtitle
+      ? `字幕（节选）：${subtitle.slice(0, 2500)}`
+      : `（没有字幕${vision ? '，只看了画面' : '，只能看标题、简介和评论'}）`,
+    vision ? `画面（抽帧）：${vision.slice(0, 900)}` : '',
     comments.length ? '热评：\n' + comments.slice(0, 8).map((c) => `  ${c.name}：${c.text}`).join('\n') : '',
   ].filter(Boolean).join('\n')
 }
 
-export function createBili({ getConfig, hub, memory, log, api: injected }) {
+export function createBili({ getConfig, hub, memory, log, dsh, api: injected }) {
   const cfg = () => getConfig().bili
   const api = injected || createBiliApi({ getCookie: () => cfg().cookie, log })
+  const shots = createShotStore({ max: () => getConfig().bili.shotLibrary })
   const file = () => dataDir('bili.json')
   const load = () => readJson(file(), () => ({ day: '', runs: 0, comments: 0, replies: 0, lastRun: 0, lastReplyCheck: 0, seen: [], repliedFeed: [], history: [] }))
   const save = (s) => writeJson(file(), s)
@@ -89,7 +95,72 @@ export function createBili({ getConfig, hub, memory, log, api: injected }) {
   async function lookAt(v) {
     const info = await api.view({ bvid: v.bvid })
     const [subtitle, comments] = await Promise.all([api.subtitle(info).catch(() => ''), api.comments(info.aid).catch(() => [])])
-    return { info, subtitle, comments, digest: digestOf(info, { subtitle, comments }) }
+    // 开着「看画面」才抽帧：失败一律只记 debug，退回纯文本，不影响这一轮
+    let vision = ''
+    let shotIds = []
+    const c = cfg()
+    if (c.vision) {
+      try {
+        const r = await lookWithVision({ dsh, api, info, getConfig, log })
+        vision = r.text || ''
+        if (vision) log.debug(`看了《${info.title}》的画面：${vision.slice(0, 40)}…`)
+        // 抽到的帧顺手存进截图库：之后她自己发、或主人让她挑一张发
+        for (const f of r.frames || []) {
+          const it = shots.put(f.buf, { bvid: info.bvid, title: info.title, sec: f.sec, note: vision.slice(0, 120) })
+          if (it) shotIds.push(it.file)
+        }
+      } catch (error) {
+        log.debug(`看画面失败（${info.bvid}）：`, error.message)
+      }
+    }
+    return { info, subtitle, comments, vision, shotIds, digest: digestOf(info, { subtitle, comments, vision }) }
+  }
+
+  /** 挑一张存下来的截图发到指定会话（主人让她发 / 她刷完顺手发）。 */
+  async function sendShot({ chatId, query = '' } = {}) {
+    const it = shots.pick(query)
+    if (!it) {
+      return {
+        ok: false,
+        message: query ? `没有和「${query}」对得上的截图（不带条件再挑就是最近的一张）` : '我还没截过图（刷 B 站看画面的时候才会截）',
+      }
+    }
+    if (!shots.exists(it)) return { ok: false, message: '那张截图的文件已经没有了' }
+    const r = await hub.sendImage(chatId, shotPath(it))
+    const g = getConfig()
+    if (!r && g.enabled && !g.dryRun) return { ok: false, message: '图没发出去，看日志' }
+    const st = load()
+    record(st, { kind: 'shot', title: it.title, bvid: it.bvid, text: `第 ${clockOf(it.sec)} 的截图` })
+    save(st)
+    log.info(`发了一张截图《${it.title}》${clockOf(it.sec)} → ${chatId}`)
+    return { ok: true, message: `发了《${it.title}》${clockOf(it.sec)} 那一帧`, shot: { title: it.title, bvid: it.bvid, sec: it.sec } }
+  }
+
+  /** 让她自己看看手上有哪些截图（挑之前先看）。 */
+  function listShots(query = '') {
+    const list = shots.list(query).slice(0, 20).map((i) => ({ title: i.title, bvid: i.bvid, sec: i.sec, clock: clockOf(i.sec), note: i.note }))
+    return list.length
+      ? { ok: true, list, message: `手上有 ${shots.count()} 张截图，这是${query ? `和「${query}」有关的 ` : '最近的 '}${list.length} 张` }
+      : { ok: false, list: [], message: query ? `没有和「${query}」对得上的截图` : '还没有截图' }
+  }
+
+  /** 面板用：截图库全量列表（按当前上限先裁一遍）。 */
+  function libraryShots() {
+    return { ok: true, items: shots.panel() }
+  }
+
+  /** 面板用：某张截图在本机的绝对路径；文件不在就返回 ''。 */
+  function shotFileOf(name) {
+    const it = shots.list('').find((i) => i.file === String(name || ''))
+    if (!it || !shots.exists(it)) return ''
+    return shotPath(it)
+  }
+
+  /** 面板用：手动删掉库里的一张。 */
+  function deleteShot(name) {
+    const r = shots.remove(name)
+    if (r.ok) log.info(r.message)
+    return r
   }
 
   /** 刷一轮。force = 面板里手动点的（不占每天的次数）。 */
@@ -129,11 +200,13 @@ export function createBili({ getConfig, hub, memory, log, api: injected }) {
       const decisions = pickJson(out, [])
       let commented = 0
       let shared = 0
+      const felt = new Map() // bvid → 她自己的一句感受，发截图时配着用
       for (const d of Array.isArray(decisions) ? decisions : []) {
         const x = looked[(Number(d.i) || 0) - 1]
         if (!x) continue
         const v = x.info
         const feeling = String(d.feeling || '').trim()
+        if (feeling) felt.set(v.bvid, feeling)
         memory?.addEvent({ text: `在B站看了《${v.title}》（UP主 ${v.author}）${feeling ? '：' + feeling.slice(0, 60) : ''}`, tags: ['B站'], importance: 0.4 })
         if (d.remember && !isSilence(d.remember)) memory?.add({ text: String(d.remember).slice(0, 200), tags: ['B站'], importance: 0.5, source: 'event' })
         const comment = String(d.comment || '').trim()
@@ -160,10 +233,32 @@ export function createBili({ getConfig, hub, memory, log, api: injected }) {
         }
         record(s, { kind: 'watch', title: v.title, bvid: v.bvid, text: feeling })
       }
+      // 刷完按概率顺手甩一张截图给主人：默认概率和发一张表情包一样，0 = 从不
+      let shotSent = 0
+      const shotTo = getConfig().ownerQQ ? `private:${getConfig().ownerQQ}` : ''
+      if (shotTo && Number(c.shotChance) > 0) {
+        const pool = looked.filter((x) => x.shotIds && x.shotIds.length)
+        if (pool.length && Math.random() < Number(c.shotChance)) {
+          const x = pool[Math.floor(Math.random() * pool.length)]
+          const file = x.shotIds[Math.floor(Math.random() * x.shotIds.length)]
+          try {
+            const line = felt.get(x.info.bvid) || ''
+            if (line) await hub.sendText(shotTo, line)
+            const r = await hub.sendImage(shotTo, file)
+            if (r || getConfig().dryRun || !getConfig().enabled) {
+              shotSent = 1
+              record(s, { kind: 'shot', title: x.info.title, bvid: x.info.bvid, text: line })
+              log.info(`刷完顺手发了张截图《${x.info.title}》`)
+            }
+          } catch (error) {
+            log.warn('顺手发截图失败：', error.message)
+          }
+        }
+      }
       if (!force) s.runs++
       s.lastRun = Date.now()
-      log.info(`刷了一轮 B 站：看了 ${looked.length} 个，评论 ${commented} 条，分享 ${shared} 个`)
-      return { ok: true, message: `看了 ${looked.length} 个视频，评论 ${commented} 条，分享给你 ${shared} 个`, watched: looked.length, commented, shared }
+      log.info(`刷了一轮 B 站：看了 ${looked.length} 个，评论 ${commented} 条，分享 ${shared} 个，截图 ${shotSent} 张`)
+      return { ok: true, message: `看了 ${looked.length} 个视频，评论 ${commented} 条，分享给你 ${shared} 个${shotSent ? '，还发了张截图' : ''}`, watched: looked.length, commented, shared, shots: shotSent }
     } catch (error) {
       log.warn('刷 B 站出错：', error.message)
       return { ok: false, message: error.message }
@@ -250,7 +345,11 @@ export function createBili({ getConfig, hub, memory, log, api: injected }) {
   }
 
   return {
-    run, checkReplies, watch, comment, tick, account,
-    state: () => { const s = today(load()); return { runs: s.runs, comments: s.comments, replies: s.replies, lastRun: s.lastRun, history: s.history.slice(0, 20), canPost: canPost(s), pauseReason: s.pauseDay === dayKey() ? s.pauseReason : '' } },
+    run, checkReplies, watch, comment, tick, account, sendShot, listShots,
+    libraryShots, shotFileOf, deleteShot,
+    state: () => {
+      const s = today(load())
+      return { runs: s.runs, comments: s.comments, replies: s.replies, lastRun: s.lastRun, history: s.history.slice(0, 20), canPost: canPost(s), pauseReason: s.pauseDay === dayKey() ? s.pauseReason : '', vision: visionState(cfg()), shots: { count: shots.count() } }
+    },
   }
 }

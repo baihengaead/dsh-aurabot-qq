@@ -258,6 +258,21 @@ export function buildTools(deps, { chat, level, sessionId }) {
         return deps.bili.comment(String(link || ''), String(text || ''))
       },
     }))
+    // 截图：刷 B 站看画面时截下来的那些帧，存在本机，随时能挑一张发出来
+    tools.push(defineTool({
+      name: 'qq_send_shot',
+      description: '把你在 B 站视频里截到的画面发到当前聊天。主人说「发张截图」「给我看看你刷到的」「刚才那个视频长啥样」这类话时用。query 填视频标题里的词或想看的内容，不填就挑最近的一张。',
+      properties: { query: str('可选：视频标题关键词，或想看的内容') },
+      required: [],
+      execute: async ({ query }) => deps.bili.sendShot({ chatId: current, query: String(query || '') }),
+    }))
+    tools.push(defineTool({
+      name: 'qq_list_shots',
+      description: '看看你手上还有哪些 B 站截图（来自哪个视频、第几秒）。挑截图之前可以先看一眼。',
+      properties: { query: str('可选，按视频标题筛选') },
+      required: [],
+      execute: async ({ query }) => deps.bili.listShots(String(query || '')),
+    }))
   }
 
   // 翻唱：面板里打开了才给她（没开就别让她答应唱歌）

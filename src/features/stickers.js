@@ -113,7 +113,7 @@ export function createStickerStore({ dsh, getConfig, onebot, log }) {
       return { ok: false, reason: '下载失败：' + error.message }
     }
     const { width, height } = imageSize(buf)
-    if (!stickerSizeOk({ width, height, bytes: buf.length })) return { ok: false, reason: `尺寸不像表情（${width}x${height}，${Math.round(buf.length / 1024)}KB）` }
+    if (!stickerSizeOk({ width, height, bytes: buf.length }, { maxSide: cfg.maxSide })) return { ok: false, reason: `尺寸不像表情（${width}x${height}，${Math.round(buf.length / 1024)}KB，上限 ${cfg.maxSide || 520}px）` }
     const md5 = createHash('md5').update(buf).digest('hex')
     const lib = loadLibrary()
     if (lib.items.some((i) => i.md5 === md5)) return { ok: false, reason: '已经有了' }

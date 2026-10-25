@@ -189,7 +189,7 @@ export function apply(ctx) {
     // 写过的空间日记也进记忆库：以后聊到相关的事，她会想起自己那天写过什么
     onDiary: (text) => memory.add({ text: `我在 QQ 空间写过：${text}`, importance: 0.55, tags: ['空间日记'], source: 'diary' }),
   })
-  const bili = createBili({ getConfig, hub, memory, log: logger.child('bili') })
+  const bili = createBili({ getConfig, hub, memory, log: logger.child('bili'), dsh: ctx })
   const qzoneSocial = createQzoneSocial({ getConfig, onebot, hub, memory, log: logger.child('qzone') })
   const speakUp = createSpeakUp({ getConfig, hub, log: logger.child('speakup'), isMuted: (chatId) => mutes.muted(chatId) })
 
@@ -529,6 +529,14 @@ export function apply(ctx) {
   route('/bili/account', async () => bili.account(true))
   route('/bili/run', async () => bili.run({ force: true }))
   route('/bili/replies', async () => bili.checkReplies())
+  // 截图库（面板里看全部、手动删）
+  route('/bili/shots', async () => ({ ...bili.libraryShots(), limit: cfg.bili.shotLibrary }))
+  route('/bili/shot/image', async (req, res) => {
+    const p = bili.shotFileOf(query(req).file)
+    if (!p) return send(res, 404, '')
+    send(res, 200, readFileSync(p), 'image/jpeg')
+  })
+  route('/bili/shot/delete', async (req) => bili.deleteShot(String((await readBody(req)).file || '')))
   route('/qzone/social/state', async () => ({ ok: true, ...qzoneSocial.state() }))
   route('/qzone/delete', async (req) => {
     const b = await readBody(req)

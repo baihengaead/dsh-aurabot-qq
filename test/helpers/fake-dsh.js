@@ -124,7 +124,9 @@ export function createFakeDsh({ brain }) {
   }
 
   async function call(path, body) {
-    const r = routes.get('/aurabot/api' + path)
+    // 路由按路径注册，query 不参与匹配（但会留在 req.url 里，给 handler 解析）
+    const clean = String(path).split('?')[0]
+    const r = routes.get('/aurabot/api' + clean)
     if (!r) throw new Error('no route ' + path)
     let out = ''
     let status = 200

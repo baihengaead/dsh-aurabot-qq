@@ -4,7 +4,7 @@
 
 import { createHash } from 'node:crypto'
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36'
+export const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36'
 const MIXIN = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52]
 
 /** 把用户粘贴的 Cookie 解析成键值；只认 B 站用得到的几个。 */
@@ -124,8 +124,23 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
     }
   }
 
-  /** 字幕全文（优先中文；AI 字幕要登录才有）。拿不到返回 ''。 */
-  async function subtitle({ bvid, aid, cid }) {
+  /**
+   * DASH 流地址（抽帧用）：{video:[{id,width,height,codecs,bandwidth,baseUrl}], audio:[...]}。
+   * 这些地址两小时左右就失效，所以每次要看画面时现取，不缓存。
+   */
+  async function playurl({ bvid, aid, cid, qn = 64 }) {
+    await ensureBuvid()
+    const d = await req(await signed('https://api.bilibili.com/x/player/wbi/playurl', {
+      ...(bvid ? { bvid } : { aid }), cid, qn, fnval: 16, fnver: 0, fourk: 0,
+    }))
+    const one = (x) => (x ? { id: x.id, width: x.width, height: x.height, codecs: x.codecs || '', bandwidth: x.bandwidth || 0, baseUrl: x.baseUrl || x.base_url || '' } : null)
+    return {
+      video: (d.dash?.video || []).map(one).filter((v) => v && v.baseUrl),
+      audio: (d.dash?.audio || []).map(one).filter((v) => v && v.baseUrl),
+    }
+  }
+
+  /** 字幕全文（优先中文；AI 字幕要登录才有）。拿不到返回 ''。 */  async function subtitle({ bvid, aid, cid }) {
     try {
       const d = await req(await signed('https://api.bilibili.com/x/player/wbi/v2', { ...(bvid ? { bvid } : { aid }), cid }))
       const list = d.subtitle?.subtitles || []
@@ -178,5 +193,5 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
     return r.headers.get('location') || ''
   }
 
-  return { nav, search, popular, view, subtitle, comments, postComment, likeVideo, replyFeed, resolveShort }
+  return { nav, search, popular, view, playurl, subtitle, comments, postComment, likeVideo, replyFeed, resolveShort }
 }
