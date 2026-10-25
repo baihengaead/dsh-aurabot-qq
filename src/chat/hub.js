@@ -216,8 +216,20 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   }
 
   /**
-   * 调试模式：把主人私聊的调试会话先建出来。
-   * 否则要等你先发一条 QQ 消息，侧栏里才会有会话可点 —— 而调试本来就是为了不碰 QQ。
+   * 调试会话刚建好时先让她说一句。
+   * DSH 的侧栏会把「一条消息都没有、焦点也不在」的会话直接藏起来 —— 空会话等于不存在，
+   * 所以这里要留下一条真实对话，会话才会出现在侧栏里。
+   * 不设 st.system，让它走正常的一轮：调试模式下这一轮只会写日志，不会真发。
+   */
+  async function seedDebugSession(chat) {
+    const { agent } = await agentFor(chat)
+    const text = '（调试模式刚开始，这条只有我看得到。轻轻跟我打个招呼，一句话就好。）'
+    const admitted = await admit(agent, [{ type: 'text', text }])
+    await agent.followup({ id: randomUUID(), role: 'user', content: admitted, source: { kind: SOURCE_KIND } })
+  }
+
+  /**
+   * 调试模式：把主人私聊的调试会话建出来，并让它有一条消息（否则侧栏看不到）。
    */
   async function ensureDebugSession() {
     const cfg = getConfig()
@@ -227,16 +239,24 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     const before = map().chats[chat.chatId]
     const prevId = before && (before.mode || 'live') === 'debug' ? before.sessionId : ''
     const r = await agentFor(chat)
-    // 以「实际有没有换会话」为准：映射里记着但会话已经找不回来时，会上面会新建一条
+    // 以「实际有没有换会话」为准：映射里记着但会话已经找不回来时，上面会新建一条
     const created = r.sessionId !== prevId
     if (created) log.info(`调试会话建好了：${r.sessionId.slice(-8)}（在左侧栏「Aurabot · QQ」里打开就能直接跟她说话）`)
+    // 空会话在侧栏是看不见的：第一次建出来、或者之前那条还没开过场，就让她先说一句
+    const needSeed = created || !before || !before.seeded
+    if (needSeed) {
+      seedDebugSession(chat).then(() => {
+        const m = map()
+        if (m.chats[chat.chatId]) { m.chats[chat.chatId].seeded = true; saveMap(m) }
+      }).catch((error) => log.debug('调试会话开场白失败：', error.message))
+    }
     return {
       ok: true,
       sessionId: r.sessionId,
       created,
       message: created
-        ? '建好了一条调试会话：左侧栏「Aurabot · QQ」里刷新一下就能看到'
-        : '调试会话已经在了（左侧栏没看到就刷新一下 DSH 页面）。也可以直接用下面的「调试对话」说话，不用管侧栏',
+        ? '建好了一条调试会话，已经让她先打了个招呼 —— 左侧栏「Aurabot · QQ」里刷新一下就能看到'
+        : '调试会话已经在了：左侧栏没看到就刷新一下 DSH 页面（空会话会被侧栏藏起来，现在有消息了应该能看到）',
     }
   }
 
