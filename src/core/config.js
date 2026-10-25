@@ -138,6 +138,18 @@ export const DEFAULTS = {
     pypiMirror: 'auto', // 安装时用的下载源：auto = 先测一下，官方源慢就用国内镜像；cn = 一直用国内镜像；off = 只用官方源
   },
   tabs: {}, // 面板记住的小偏好
+  // 模块：内置的和数据目录 modules/ 里自己写的。{ 模块id: { enabled, useBuiltin } }，没写的算开着
+  // useBuiltin：自己写了同名模块，但想先用回内置的
+  modules: {},
+  safeMode: false, // 安全模式：自己写的模块一个都不加载（排查问题用）
+  ext: {}, // 自己写的模块的设置：{ 模块id: {...} }
+  // 联动：让别的程序、DSH 里别的会话和插件也能用她
+  bridge: {
+    dshTools: false, // DSH 里别的会话（比如你平时写代码的会话）能用工具让她发 QQ、查记忆
+    http: false, // 开放 HTTP 接口（要带密钥）
+    token: '', // 第一次打开时自动生成
+    allowTargets: 'whitelist', // 外部能发给谁：whitelist = 白名单里的人和群；owner = 只能发给主人
+  },
 }
 
 const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v)
@@ -261,11 +273,37 @@ export function normalize(raw) {
   c.song.pypiMirror = { '': 'auto', tuna: 'cn' }[c.song.pypiMirror] ?? c.song.pypiMirror
   if (!['auto', 'cn', 'off'].includes(c.song.pypiMirror)) c.song.pypiMirror = 'auto'
   c.song.root = String(c.song.root || '').trim()
+  if (!isObj(c.modules)) c.modules = {}
+  for (const [id, m] of Object.entries(c.modules)) {
+    if (!isObj(m)) { delete c.modules[id]; continue }
+    m.enabled = bool(m.enabled, true)
+    m.useBuiltin = bool(m.useBuiltin, false)
+  }
+  if (!isObj(c.ext)) c.ext = {}
+  for (const k of Object.keys(c.ext)) if (!isObj(c.ext[k])) delete c.ext[k] // 传 null = 删掉这个模块的设置
+  c.safeMode = bool(c.safeMode, false)
+  c.bridge.dshTools = bool(c.bridge.dshTools, false)
+  c.bridge.http = bool(c.bridge.http, false)
+  c.bridge.token = String(c.bridge.token || '')
+  if (!['whitelist', 'owner'].includes(c.bridge.allowTargets)) c.bridge.allowTargets = 'whitelist'
   return c
 }
 
-// 面板里不回传原文的字段：[分组, 字段]
-const SECRETS = [['snowluma', 'webuiPassword'], ['snowluma', 'httpToken'], ['snowluma', 'wsToken'], ['imageGen', 'apiKey'], ['song', 'neteaseCookie'], ['bili', 'cookie'], ['bili', 'sessdata'], ['bili', 'biliJct']]
+// 面板里不回传原文的字段：路径（几层都行）
+const SECRETS = [['snowluma', 'webuiPassword'], ['snowluma', 'httpToken'], ['snowluma', 'wsToken'], ['imageGen', 'apiKey'], ['song', 'neteaseCookie'], ['bili', 'cookie'], ['bili', 'sessdata'], ['bili', 'biliJct'], ['bridge', 'token']]
+// 扩展模块设置里的密码类字段（模块加载时登记）：['ext', 模块id, 字段]
+const extraSecrets = new Map()
+export function registerSecretField(path) { extraSecrets.set(path.join('\u0000'), path) }
+const allSecrets = () => [...SECRETS, ...extraSecrets.values()]
+const parentOf = (obj, path, create) => {
+  let cur = obj
+  for (const k of path.slice(0, -1)) {
+    if (!isObj(cur[k])) { if (!create) return null; cur[k] = {} }
+    cur = cur[k]
+  }
+  return cur
+}
+const getAt = (obj, path) => { const p = parentOf(obj, path, false); return p ? p[path.at(-1)] : undefined }
 // 这些密钥在面板里显示结尾几位（「已保存（结尾 …a1b2）」），方便认出存的是哪一份；完整值不回传
 const HINTED = [['bili', 'sessdata'], ['bili', 'biliJct']]
 
@@ -325,9 +363,12 @@ export function saveConfig(cfg) {
 export function publicConfig(cfg) {
   const c = structuredClone(cfg)
   for (const [g, k] of HINTED) c[g][`${k}Hint`] = c[g][k] ? '…' + String(c[g][k]).slice(-4) : ''
-  for (const [g, k] of SECRETS) {
-    c[g][`${k}Set`] = Boolean(c[g][k])
-    c[g][k] = ''
+  for (const path of allSecrets()) {
+    const p = parentOf(c, path, false)
+    if (!p) continue
+    const k = path.at(-1)
+    p[`${k}Set`] = Boolean(p[k])
+    p[k] = ''
   }
   return c
 }
@@ -335,13 +376,18 @@ export function publicConfig(cfg) {
 /** 面板保存时：没改的密码字段（空串）保留原值。 */
 export function mergeFromPanel(current, incoming) {
   const next = deepMerge(current, incoming || {})
-  for (const [g, k] of SECRETS) {
-    const v = incoming?.[g]?.[k]
-    if (v === null) next[g][k] = '' // 明确传 null = 清空
-    else if (v === undefined || v === '') next[g][k] = current[g][k]
-    delete next[g][`${k}Set`]
-    delete next[g][`${k}Hint`]
+  for (const path of allSecrets()) {
+    const v = getAt(incoming || {}, path)
+    const p = parentOf(next, path, v !== undefined)
+    if (!p) continue
+    const k = path.at(-1)
+    if (v === null) p[k] = '' // 明确传 null = 清空
+    else if (v === undefined || v === '') p[k] = getAt(current, path) ?? ''
+    delete p[`${k}Set`]
+    delete p[`${k}Hint`]
   }
+  // 联动密钥只由插件生成，面板不能改
+  next.bridge.token = current.bridge?.token || ''
   // B 站：只改了其中一个值时，另一个保留；整串粘进来的会在 normalize 里拆开
   if (incoming?.bili && (incoming.bili.sessdata || incoming.bili.biliJct)) next.bili.cookie = ''
   if (incoming?.group?.overrides) next.group.overrides = incoming.group.overrides

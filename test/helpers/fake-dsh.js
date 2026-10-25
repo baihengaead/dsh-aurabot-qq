@@ -32,8 +32,12 @@ export function createFakeDsh({ brain }) {
       tools,
       contexts,
       events,
+      denied: new Set(),
       ctx: {
-        tools: { register: (t) => { tools.set(t.name, t); return () => tools.delete(t.name) } },
+        tools: {
+          register: (t) => { tools.set(t.name, t); return () => tools.delete(t.name) },
+          restrict: ({ deny = [] }) => { for (const n of deny) agent.denied.add(n); return () => { for (const n of deny) agent.denied.delete(n) } },
+        },
         systemPrompt: { context: (c) => { contexts.set(c.name, c); return () => contexts.delete(c.name) } },
       },
       followup(msg) {
@@ -63,7 +67,12 @@ export function createFakeDsh({ brain }) {
     return agent
   }
 
+  const globalTools = new Map() // 全局工具（DSH 所有会话都能看到）
+  const provided = new Map() // ctx.provide 登记的服务
   const ctx = {
+    globalTools,
+    tools: { register: (t) => { if (globalTools.has(t.name)) throw new Error('dup ' + t.name); globalTools.set(t.name, t); return () => globalTools.delete(t.name) } },
+    provide(name, value) { provided.set(name, value); disposers.push(() => provided.delete(name)) },
     logger: { info: (m) => logs.push(m), warn: (m) => logs.push(m), error: (m) => logs.push(m) },
     effect(fn) {
       const d = fn()
@@ -119,19 +128,20 @@ export function createFakeDsh({ brain }) {
       agentDefaultModel: { currentSelection: () => ({ provider: 'fake', model: 'fake-1' }) },
     },
     get(name) {
-      return this.services[name] ?? this[name]
+      return this.services[name] ?? provided.get(name) ?? this[name]
     },
   }
 
-  async function call(path, body) {
-    // 路由按路径注册，query 不参与匹配（但会留在 req.url 里，给 handler 解析）
-    const clean = String(path).split('?')[0]
-    const r = routes.get('/aurabot/api' + clean)
+  async function call(path, body, headers = {}) {
+    const full = '/aurabot/api' + path.split('?')[0]
+    // 先精确匹配，再找最长的前缀路由（和 DSH 的网页服务一样）
+    const r = routes.get(full) || [...routes.values()].filter((x) => x.kind === 'prefix' && (full === x.path || full.startsWith(x.path + '/'))).sort((a, b) => b.path.length - a.path.length)[0]
     if (!r) throw new Error('no route ' + path)
     let out = ''
     let status = 200
     const req = {
       url: '/aurabot/api' + path,
+      headers,
       async *[Symbol.asyncIterator]() { if (body) yield JSON.stringify(body) },
     }
     const res = { set statusCode(v) { status = v }, setHeader() {}, end(s) { out = s } }

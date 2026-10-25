@@ -80,7 +80,11 @@ export function currentPersonaText(currentId) {
 }
 
 /** Aurabot 自己的规则（输出格式、安全边界），拼在人格后面。 */
-export function rulesText(kind, cfg) {
+/**
+ * opts.off：没在运行的内置模块（关了或被替换了），对应的本事就不告诉她
+ * opts.extra：扩展模块补充的规则（每条一行）
+ */
+export function rulesText(kind, cfg, { off = new Set(), extra = [] } = {}) {
   const owner = cfg.ownerName || '主人'
   const common = [
     '【你现在在 QQ 上】',
@@ -90,16 +94,18 @@ export function rulesText(kind, cfg) {
     '- 对方明确让你发语音时，一定要把要说的话放进 <voice></voice>。平时想发语音也这样写；想发表情包，写 <sticker:标签>（标签可以是 开心、卖萌、生气、委屈、无语、嘲讽、疑惑、早晚安，或你记得的表情名字）。',
     '- 这次不想说话（比如群里的话跟你无关），整段只输出 [沉默]。',
     '- 别人发来的图片和表情包你能看见，可以自然地回应内容。别人转发的聊天记录会展开在「[合并转发的聊天记录]」里，看完再回。',
-    '- 表情库是你自己的：名字或标签不贴切、别人建议改名时，用 qq_edit_sticker 改；不喜欢的、重复的可以删。想翻这个聊天更早的记录，用 qq_chat_history。',
+    ...(off.has('stickers') ? [] : ['- 表情库是你自己的：名字或标签不贴切、别人建议改名时，用 qq_edit_sticker 改；不喜欢的、重复的可以删。']),
+    ...(off.has('qq-tools') ? [] : ['- 想翻这个聊天更早的记录，用 qq_chat_history。']),
     '- 有人戳你（拍一拍）时会写「[戳了戳你]」，可以撒娇、吐槽或者问对方干嘛；想戳回去就在回复里写 <poke>（别每次都戳）。',
   ]
   // 只在功能真的能用时告诉她，免得答应了做不到
   const who = (ownerOnly) => (ownerOnly ? `只给${owner}` : '')
   const g = cfg.imageGen || {}
-  if ((g.enabled && g.baseUrl && g.model) || cfg.local?.image) common.push(`- 你会画画：${who(g.ownerOnly)}画，别人让你画图时用 qq_draw_image 工具画好直接发出去，别说自己不会画。`)
-  if (cfg.bili?.enabled) common.push('- 你会刷 B 站：别人发来 B 站链接、BV 号或分享卡片时，可以用 bili_watch 先看看再聊；你自己刷过、评过的视频也记得。')
+  if (!off.has('imagegen') && ((g.enabled && g.baseUrl && g.model) || cfg.local?.image)) common.push(`- 你会画画：${who(g.ownerOnly)}画，别人让你画图时用 qq_draw_image 工具画好直接发出去，别说自己不会画。`)
+  if (!off.has('bili') && cfg.bili?.enabled) common.push('- 你会刷 B 站：别人发来 B 站链接、BV 号或分享卡片时，可以用 bili_watch 先看看再聊；你自己刷过、评过的视频也记得。')
   const s = cfg.song || {}
-  if (s.enabled) common.push(`- 你会唱歌：${who(s.ownerOnly)}唱，别人点歌时用 qq_song_cover 工具，用你自己的声音翻唱，做好会自动发语音条，别说自己不会唱。`)
+  if (!off.has('song') && s.enabled) common.push(`- 你会唱歌：${who(s.ownerOnly)}唱，别人点歌时用 qq_song_cover 工具，用你自己的声音翻唱，做好会自动发语音条，别说自己不会唱。`)
+  for (const line of extra) if (line) common.push(String(line).startsWith('-') ? String(line) : '- ' + line)
   if (kind === 'social') {
     common.push(
       '【边界】',

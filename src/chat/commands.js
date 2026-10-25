@@ -2,11 +2,21 @@
 
 import { dataDir, readJson, writeJson } from '../core/store.js'
 
-/** 解析命令：「/silent 30」→ { name: 'silent', arg: '30' }。不是命令返回 null。支持全角斜杠和中文别名。 */
-export function parseCommand(text) {
-  const m = String(text || '').trim().match(/^[/／]\s*([A-Za-z一-龥]+)\s*([\s\S]*)$/)
+/**
+ * 解析命令：「/silent 30」→ { name: 'silent', arg: '30' }。不是命令返回 null。支持全角斜杠和中文别名。
+ * extra：扩展模块加的命令 [{ name, aliases, desc, run }]，命中时返回 { name, arg, ext }；和内置同名时扩展的优先。
+ */
+export function parseCommand(text, extra = []) {
+  const m = String(text || '').trim().match(/^[/／]\s*([A-Za-z0-9一-龥_-]+)\s*([\s\S]*)$/)
   if (!m) return null
   const word = m[1].toLowerCase()
+  for (const c of extra) {
+    const names = [c.name, ...(c.aliases || [])].map((x) => String(x).toLowerCase())
+    if (names.includes(word)) return { name: c.name, arg: m[2].trim(), ext: c }
+    // 中文命令后面直接跟内容：「/天气北京」
+    const pre = names.filter((k) => /[一-龥]/.test(k) && word.startsWith(k)).sort((a, b) => b.length - a.length)[0]
+    if (pre) return { name: c.name, arg: (m[1].slice(pre.length) + ' ' + m[2]).trim(), ext: c }
+  }
   const name = ALIASES[word] || word
   if (COMMANDS[name]) return { name, arg: m[2].trim() }
   // 中文命令后面不加空格直接跟内容：「/记住我不吃香菜」
@@ -44,10 +54,14 @@ const COMMANDS = {
   off: '关掉总开关（之后除了命令什么都不回）',
 }
 
-export const commandList = () => Object.entries(COMMANDS).map(([name, desc]) => ({ name, desc, aliases: Object.keys(ALIASES).filter((k) => ALIASES[k] === name && /[一-龥]/.test(k)) }))
+export const commandList = (extra = []) => [
+  ...Object.entries(COMMANDS).map(([name, desc]) => ({ name, desc, aliases: Object.keys(ALIASES).filter((k) => ALIASES[k] === name && /[一-龥]/.test(k)) })),
+  ...extra.map((c) => ({ name: c.name, desc: c.desc || '', aliases: c.aliases || [], module: c.module || '' })),
+]
 
-export function helpText() {
+export function helpText(extra = []) {
   return '主人命令（也可以用中文，如 /闭嘴 /说话）：\n' + Object.entries(COMMANDS).map(([k, v]) => `/${k}  ${v}`).join('\n')
+    + (extra.length ? '\n扩展模块加的：\n' + extra.map((c) => `/${c.name}  ${c.desc || ''}`).join('\n') : '')
 }
 
 /** 每个聊天的闭嘴状态：chatId → 到什么时候（毫秒，Infinity 写成 0 表示一直）。 */
@@ -94,17 +108,17 @@ export async function runCommand(cmd, msg, deps) {
   }
   switch (cmd.name) {
     case 'help':
-      return helpText()
+      return helpText(deps.extraCommands || [])
     case 'silent': {
       const min = Math.max(0, Math.min(7 * 24 * 60, Number.parseInt(cmd.arg, 10) || 0))
       mutes.set(msg.chatId, min)
-      mood.nudge?.(-6, '主人让她闭嘴') // 有点委屈
+      mood?.nudge?.(-6, '主人让她闭嘴') // 有点委屈
       if (inGroup) hub.leaveTopic?.(msg.groupId)
       return min ? `好，我在${here}安静 ${min} 分钟` : `好，我在${here}先不说话了，想我了发 /active`
     }
     case 'active':
       mutes.clear(msg.chatId)
-      mood.nudge?.(4, '主人让她回来说话')
+      mood?.nudge?.(4, '主人让她回来说话')
       if (inGroup) hub.joinTopic?.(msg.groupId)
       return inGroup ? '我回来啦' : '在呢'
     case 'quiet':
@@ -124,7 +138,7 @@ export async function runCommand(cmd, msg, deps) {
       const mu = mutes.until(msg.chatId)
       const lines = [
         `总开关：${cfg.enabled ? '开' : '关'}${cfg.dryRun ? '（试运行，不真发）' : ''}`,
-        `心情：${mood.label()}`,
+        ...(mood ? [`心情：${mood.label()}`] : []),
         `今天：收到 ${st.received} 条，发出 ${st.sent} 条`,
         `${here}：${mu === undefined ? '正常说话' : mu === 0 ? '闭嘴中' : '闭嘴到 ' + new Date(mu).toLocaleTimeString().slice(0, 5)}`,
       ]
@@ -165,13 +179,14 @@ export async function runCommand(cmd, msg, deps) {
       return deps.song.request({ song: name, pitch: m ? Number(m[2]) : undefined, chatId: msg.chatId }).message
     }
     case 'mood':
-      return `现在${mood.label()}`
+      return mood ? `现在${mood.label()}` : '心情模块关着'
     case 'diary': {
       if (!qzone) return '空间日记没开'
       const r = await qzone.writeDiary()
       return r.ok ? (r.dryRun ? '写好了，不过现在是试运行，没真发' : '写好发出去啦，去空间看看') : '没写成：' + (r.message || '不知道为啥')
     }
     case 'remember': {
+      if (!memory) return '记忆模块关着'
       if (!cmd.arg) return '要我记住什么呀？比如 /remember 我不吃香菜'
       const r = memory.add({ text: cmd.arg, aboutName: cfg.ownerName || '主人', about: cfg.ownerQQ, importance: 0.8, source: 'panel', chatId: msg.chatId })
       return r.ok ? '记住了' : '没记上：' + (r.message || '')

@@ -2,7 +2,7 @@
 // 推理引擎用 Applio（MIT，固定版本），人声分离用 audio-separator，都装在一个独立的 Python 环境里，不碰系统环境。
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, statSync, statfsSync, writeFileSync, readFileSync, rmSync, copyFileSync, renameSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, statSync, statfsSync, writeFileSync, readFileSync, rmSync, copyFileSync, renameSync, openSync, readSync, closeSync } from 'node:fs'
 import { join, basename, dirname, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
@@ -108,6 +108,23 @@ async function fetchFile(python, dest, urls, note, log, onProgress, label = base
       } else if (/^retry /.test(line)) note?.('  ' + line.replace(/^retry /, '断了，换个源接着下：'))
     },
   })
+}
+
+/** 模型文件能不能读：刚下完/导入的大文件常被杀毒软件锁住几秒，等一等再试，还不行就报出是哪个文件。 */
+export async function ensureReadable(files, tries = 4, waitMs = 3000) {
+  for (const f of files) {
+    if (!existsSync(f)) continue
+    for (let i = 1; ; i++) {
+      try {
+        const fd = openSync(f, 'r')
+        try { readSync(fd, Buffer.alloc(16), 0, 16, 0) } finally { closeSync(fd) }
+        break
+      } catch (error) {
+        if (i >= tries || !/EACCES|EPERM|EBUSY/.test(error.code || '')) throw new Error(`Permission denied: '${f}'（${error.code || error.message}）`)
+        await new Promise((r) => setTimeout(r, waitMs))
+      }
+    }
+  }
 }
 
 /** 一个目录（含子目录）有多大，字节。目录不存在算 0。 */
@@ -369,6 +386,10 @@ export function explainSongError(message) {
   if (/size mismatch|Error\(s\) in loading state_dict|unexpected key|Missing key|KeyError: '(weight|config|params)'/i.test(m)) return '这个音色模型和内置的 RVC 不兼容（可能是 so-vits-svc 之类训练的，或者不是完整的模型文件）。可以在面板「本地接口」里接你自己的推理'
   if (/CUDA out of memory|OutOfMemoryError|not enough memory/i.test(m)) return '显卡显存不够，关掉别的占显存的程序（游戏、别的 AI）再试'
   if (/No module named|ModuleNotFoundError/i.test(m)) return '翻唱环境不完整，在面板「翻唱」页点「重新检查 / 修复安装」'
+  if (/Permission denied|Errno 13|EACCES|EPERM|EBUSY/i.test(m)) {
+    const file = (m.match(/'([^']+\.(?:ckpt|pth|onnx|yaml|json))'/i) || [])[1]?.replace(/\\\\/g, '\\')
+    return `${file ? `读不了「${file}」` : '有个模型文件读不了'}：多半是杀毒软件（360、火绒、Defender）正在扫描或拦住了它，或者文件是用管理员身份放进去的。把翻唱目录加进杀毒软件的信任区再试；还不行就删掉这个文件，在面板「翻唱」页重新下载`
+  }
   return m
 }
 
@@ -668,6 +689,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, onSu
     const p = P()
     mkdirSync(p.separatorModels, { recursive: true })
     const model = cfg().separatorModel
+    await ensureReadable((SEPARATOR_FILES[model] || [[model]]).map(([n]) => join(p.separatorModels, n)))
     await run(p.separatorExe, [input, '--model_filename', model, '--model_file_dir', p.separatorModels, '--output_dir', dir, '--output_format', 'WAV'], { log, env: pyEnv(), timeoutMs: 20 * 60_000 })
     const files = readdirSync(dir)
     const vocals = files.find((f) => /\(vocals\)/i.test(f))

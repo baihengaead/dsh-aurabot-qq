@@ -4,35 +4,32 @@
 //   SnowLuma（OneBot v11）⇄ 本插件 ⇄ DSH 会话（Aurabot 自带的 preset + 人格）
 // 面板在侧栏「自动化任务」下面（网页半边见 client/client.js），这里提供它要的 /aurabot/api/* 接口。
 //
+// 这个文件只管「核心」：配置、QQ 网关、聊天中枢、人格、面板接口、模块内核和联动。
+// 表情、语音、记忆、空间、B 站、翻唱、生图……都是模块（src/modules/），能单独关掉，也能用自己写的替换。
+//
 // ⚠ 安全默认：总开关关、试运行开。不手动打开，一句都不会真的发到 QQ。
 
-import { readFileSync, existsSync, writeFileSync, unlinkSync, statSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync, unlinkSync, statSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { spawn } from 'node:child_process'
 import { loadConfig, saveConfig, publicConfig, mergeFromPanel } from './core/config.js'
 import { createLogger } from './core/logger.js'
 import { registerSecret, redact } from './core/redact.js'
 import { createOneBotClient } from './onebot/client.js'
 import { createSnowLumaManager, DOWNLOAD_PAGE } from './snowluma/manager.js'
 import { createHub, WORKSPACE_DIR } from './chat/hub.js'
-import { createStickerStore, stickerPath } from './features/stickers.js'
-import { createQzone } from './features/qzone.js'
-import { createQzoneSocial } from './features/qzone-social.js'
-import { createBili } from './bili/duty.js'
-import { createLocal, fileOf } from './local/local.js'
-import { createMood, createSpeakUp } from './features/companion.js'
-import { createSongStudio, checkRoot, listDrives } from './song/studio.js'
-import { createMemoryStore } from './features/memory.js'
-import { createImageGen } from './features/imagegen.js'
-import { textToSpeech, edgeInstalled, installEdge } from './voice/tts.js'
-import { buildTools } from './tools/tools.js'
+import { createLocal, fileOf, toImageBuffer } from './local/local.js'
 import { createGroupRoles } from './chat/group-roles.js'
-import { defaultModel } from './core/llm.js'
+import { defaultModel, askModel } from './core/llm.js'
 import { mimeOf } from './chat/inbound.js'
 import { dataDir, ensureDir } from './core/store.js'
 import { createUpdateChecker, changelogSection } from './core/update.js'
 import { parseCommand, runCommand, createMutes, commandList } from './chat/commands.js'
 import { listPersonas, readPersona, savePersona, deletePersona, currentPersonaText, rulesText, seedPersonas } from './persona/personas.js'
+import { createModules, API_VERSION } from './core/modules.js'
+import { createBridge } from './core/bridge.js'
+import { BUILTINS } from './modules/index.js'
 
 export const name = 'aurabot'
 export const inject = ['agents', 'sessions', 'webServer', 'timer', 'workspaceRegistry', 'attachments', 'systemPrompt', 'llm']
@@ -48,20 +45,30 @@ export function apply(ctx) {
   const logger = createLogger({ dsh: ctx })
   const log = logger.child('core')
   let cfg = loadConfig()
+  let mods = null
+  let bridge = null
   const getConfig = () => cfg
+  const secrets = () => { for (const k of ['webuiPassword', 'httpToken', 'wsToken']) registerSecret(cfg.snowluma[k]); registerSecret(cfg.imageGen.apiKey); registerSecret(cfg.bridge.token) }
   const setConfig = (next) => {
+    const before = cfg
     cfg = saveConfig(next)
-    for (const k of ['webuiPassword', 'httpToken', 'wsToken']) registerSecret(cfg.snowluma[k]); registerSecret(cfg.imageGen.apiKey)
+    secrets()
+    if (bridge && before.bridge.dshTools !== cfg.bridge.dshTools) bridge.refresh()
+    if (mods && (JSON.stringify(before.modules) !== JSON.stringify(cfg.modules) || before.safeMode !== cfg.safeMode)) mods.sync().catch(() => {})
+    mods?.emit('config', cfg, before)
     return cfg
   }
-  for (const k of ['webuiPassword', 'httpToken', 'wsToken']) registerSecret(cfg.snowluma[k]); registerSecret(cfg.imageGen.apiKey)
+  secrets()
   seedPersonas()
 
   // ---------- 人格与规则：通过提示词变量注入到 Aurabot 的两个 preset ----------
   const variable = (n, fn) => ctx.effect(() => ctx.systemPrompt.variable(n, fn), `aurabot: 变量 ${n}`)
-  variable('aurabot_persona', () => currentPersonaText(cfg.persona.current))
-  variable('aurabot_rules_private', () => rulesText('private', cfg))
-  variable('aurabot_rules_social', () => rulesText('social', cfg))
+  const rulesOpts = (kind) => (mods ? { off: mods.builtinOff(), extra: mods.rules(kind) } : {})
+  // 扩展模块能整段改写人格和规则（同步：提示词变量不能等）
+  const rewrite = (event, text, ...args) => { const r = mods ? mods.filterSync(event, text, ...args) : text; return typeof r === 'string' ? r : r === null ? '' : text }
+  variable('aurabot_persona', () => rewrite('persona', currentPersonaText(cfg.persona.current)))
+  variable('aurabot_rules_private', () => rewrite('rules', rulesText('private', cfg, rulesOpts('private')), 'private'))
+  variable('aurabot_rules_social', () => rewrite('rules', rulesText('social', cfg, rulesOpts('social')), 'social'))
 
   // ---------- QQ 网关 ----------
   const snowluma = createSnowLumaManager({
@@ -82,15 +89,17 @@ export function apply(ctx) {
   }
   let onebotState = 'stopped'
   let hub = null
-  let groupRoles = null
   const onebot = createOneBotClient({
     endpoint,
     log: logger.child('onebot'),
     onState: (s, d) => {
       onebotState = s
       logger.child('onebot').info(`QQ 网关：${s}${d ? '（' + d + '）' : ''}`)
+      mods?.emit('onebot/state', s)
     },
     onEvent: (ev) => {
+      // 模块能看到所有原始事件（加群、撤回、好友申请……），只看不拦
+      mods?.emit('onebot', ev)
       if (ev.post_type === 'message' || ev.post_type === 'message_sent') {
         if (ev.post_type === 'message') hub.onMessage(ev).catch((error) => log.error('处理消息出错：', error.message))
       } else if (ev.post_type === 'notice' && ev.notice_type === 'notify' && ev.sub_type === 'poke') {
@@ -98,43 +107,10 @@ export function apply(ctx) {
       }
     },
   })
-  groupRoles = createGroupRoles({ onebot, getConfig, log: logger.child('chat') })
-
-
-  // ---------- 功能 ----------
-  const stickers = createStickerStore({ dsh: ctx, getConfig, onebot, log: logger.child('sticker') })
-  const mood = createMood({ getConfig, dsh: ctx })
-  let memory = null
+  const groupRoles = createGroupRoles({ onebot, getConfig, log: logger.child('chat') })
   const local = createLocal({ getConfig, log: logger })
-  const song = createSongStudio({
-    local,
-    getConfig,
-    log: logger.child('song'),
-    sendVoiceFile: (chatId, file, note) => hub.sendVoiceFile(chatId, file, note),
-    sendText: (chatId, text) => hub.sendText(chatId, text),
-    onSung: (title, chatId) => {
-      mood.nudge(8, `唱完了「${title}」`)
-      // 唱过的歌记成她的经历：私聊记到对方头上
-      const uid = String(chatId).startsWith('private:') ? String(chatId).slice(8) : ''
-      const who = uid === String(cfg.ownerQQ) ? cfg.ownerName || '主人' : uid ? '对方' : '群里'
-      memory?.addEvent({ text: `给${who}唱了《${title}》`, about: uid, tags: ['唱歌'], importance: 0.5 })
-    },
-  })
-  const imageGen = createImageGen({ getConfig, log: logger.child('imagegen'), local })
-  const tts = {
-    speak: async (text) => {
-      // 本地接口接管语音合成；出错退回内置
-      if (local.active('tts')) {
-        try {
-          const file = fileOf(await local.call('tts', { text }))
-          if (file && existsSync(file)) return { file, engine: 'local' }
-        } catch (error) {}
-      }
-      return textToSpeech(text, cfg.voice, logger.child('voice'))
-    },
-  }
-  let qzone = null
   const mutes = createMutes()
+
   /** DSH 里能用的所有模型：[{provider, model, name}] */
   async function listModels() {
     const llm = ctx.llm || ctx.get('llm')
@@ -147,6 +123,25 @@ export function apply(ctx) {
     }
     return out
   }
+
+  // 聊天中枢找表情库、语音时，找的是当时在跑的那个模块；模块关着就当没有
+  const use = (id) => mods?.use(id) || null
+  const stickers = {
+    match: (q) => use('stickers')?.match?.(q) ?? null,
+    segmentFor: (it) => use('stickers')?.segmentFor?.(it) ?? null,
+    markUsed: (md5) => use('stickers')?.markUsed?.(md5),
+    pickForReply: (t) => use('stickers')?.pickForReply?.(t) ?? null,
+    collect: async (s, chatId) => (use('stickers')?.collect ? use('stickers').collect(s, chatId) : { ok: false, reason: '表情包模块关着' }),
+    library: () => use('stickers')?.library?.() ?? { items: [] },
+  }
+  const tts = {
+    speak: async (text) => {
+      const v = use('voice')
+      if (!v?.speak) throw new Error('语音模块关着')
+      return v.speak(text)
+    },
+  }
+
   hub = createHub({
     localApi: local,
     dsh: ctx,
@@ -155,43 +150,100 @@ export function apply(ctx) {
     onebot,
     stickers,
     tts,
-    buildTools: (where) => buildTools({ hub, getConfig, stickers, qzone, memory, song, onebot, imageGen, groupRoles, bili }, where),
-    contextProviders: [
-      // 她在这个群的身份：没管理权限就别答应禁言踢人
-      ({ chat }) => {
-        if (chat.kind !== 'group') return ''
-        const role = groupRoles.peek(chat.groupId)
-        if (!role) return ''
-        return groupRoles.canManage(role) ? `你在这个群是${groupRoles.label(role)}，主人要求时可以用群管工具。` : '你在这个群只是普通成员，没有管理权限：禁言、踢人这些做不了，主人要求时直接说明。'
-      },
-({ chat }) => (chat.kind === 'system' ? '' : mood.contextLine()), ({ chat, sessionId }) => (chat.kind === 'system' ? '' : memory.contextFor(chat, sessionId))],
-    onActivity: (a) => {
-      if (a.kind === 'in' && a.text) mood.observe(a.text, a.nickname, { direct: a.direct, owner: a.owner })
-      // 模型判心情（开了才判）：系统提醒开头的是她自己主动找人
-      if (a.kind === 'out' && a.reply && !String(a.chatId).startsWith('system:')) {
-        const speakUp = String(a.userText).startsWith('【系统提醒')
-        mood.judge({ userText: a.userText, reply: a.reply, who: String(a.chatId).startsWith('group:') ? '群里的人' : String(a.chatId) === `private:${cfg.ownerQQ}` ? cfg.ownerName || '主人' : '对方', origin: speakUp ? 'speak-up' : 'user' }).catch(() => {})
-      }
-    },
+    buildTools: (where) => mods.buildTools(where),
+    contextProviders: [(args) => mods.contextFor(args)],
+    onActivity: (a) => mods.emit('activity', a),
     // 群聊话题和她的记忆有多相关（插话判断用）
-    memoryScore: (text) => (memory ? memory.topicScore(text) : 0),
-    // QQ 里的主人命令
+    memoryScore: (text) => use('memory')?.topicScore?.(text) ?? 0,
+    // QQ 里的主人命令（模块加的命令优先）
     onCommand: async (msg) => {
-      const cmd = parseCommand(msg.text)
-      return cmd ? runCommand(cmd, msg, { getConfig, setConfig, mutes, hub, mood, memory, qzone, song, listModels, defaultModel: () => defaultModel(ctx, { model: {} }) }) : null
+      const cmd = parseCommand(msg.text, mods.commands())
+      if (!cmd) return null
+      if (cmd.ext) return String((await cmd.ext.run(cmd.arg, msg)) ?? '')
+      return runCommand(cmd, msg, { getConfig, setConfig, mutes, hub, mood: use('mood'), memory: use('memory'), qzone: use('diary'), song: use('song'), listModels, defaultModel: () => defaultModel(ctx, { model: {} }), extraCommands: mods.commands() })
     },
     isMuted: (chatId) => mutes.muted(chatId),
-    moodEffects: () => mood.effects(),
+    moodEffects: () => use('mood')?.effects?.() ?? null,
+    hooks: {
+      message: (msg) => mods.claim('message', msg),
+      reply: (text, info) => mods.filter('reply', text, info),
+      deniedTools: () => bridge?.deniedTools() || [],
+      groupDecide: (decision, info) => mods.filter('group/decide', decision, info),
+      prompt: (content, info) => mods.filter('prompt', content, info),
+      items: (items, info) => mods.filter('reply/items', items, info),
+      send: (message, info) => mods.filter('send', message, info),
+      model: (sel, chat) => mods.filterSync('model', sel, chat),
+      poke: (ev) => mods.claim('poke', ev),
+    },
   })
-  memory = createMemoryStore({ dsh: ctx, getConfig, hub, log: logger.child('memory') })
-  qzone = createQzone({
-    getConfig, onebot, hub, log: logger.child('qzone'),
-    // 写过的空间日记也进记忆库：以后聊到相关的事，她会想起自己那天写过什么
-    onDiary: (text) => memory.add({ text: `我在 QQ 空间写过：${text}`, importance: 0.55, tags: ['空间日记'], source: 'diary' }),
-  })
-  const bili = createBili({ getConfig, hub, memory, log: logger.child('bili'), dsh: ctx })
-  const qzoneSocial = createQzoneSocial({ getConfig, onebot, hub, memory, log: logger.child('qzone') })
-  const speakUp = createSpeakUp({ getConfig, hub, log: logger.child('speakup'), isMuted: (chatId) => mutes.muted(chatId) })
+
+  // ---------- 面板接口的小工具 ----------
+  const send = (res, code, body, type = 'application/json; charset=utf-8') => {
+    try {
+      res.statusCode = code
+      res.setHeader?.('content-type', type)
+      res.setHeader?.('cache-control', 'no-store')
+      res.end?.(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body))
+    } catch (error) {}
+  }
+  const readBody = async (req) => {
+    let s = ''
+    try { for await (const c of req) s += c } catch (error) {}
+    try { return JSON.parse(s || '{}') } catch (error) { return {} }
+  }
+  /** 原样读请求体（上传大文件用），超过 max 字节就报错。 */
+  const readRaw = async (req, max) => {
+    const parts = []
+    let n = 0
+    for await (const c of req) {
+      const b = Buffer.isBuffer(c) ? c : Buffer.from(c)
+      n += b.length
+      if (n > max) throw new Error(`文件太大了（最多 ${Math.round(max / 1024 / 1024)}MB）`)
+      parts.push(b)
+    }
+    return Buffer.concat(parts)
+  }
+  const query = (req) => {
+    try { return Object.fromEntries(new URL(req.url, 'http://x').searchParams) } catch (error) { return {} }
+  }
+  // 核心自己的接口登记成精确路径；模块的接口都走一个前缀路由，请求进来再查表
+  // （模块随时开关、重新加载；关着的模块的接口回「模块没开」，面板不会白屏）
+  const answer = async (res, fn) => {
+    try {
+      const r = await fn()
+      if (r !== undefined) send(res, 200, r)
+    } catch (error) {
+      send(res, 200, { ok: false, message: redact(String(error && error.message ? error.message : error)) })
+    }
+  }
+  const route = (path, handler) => ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: PREFIX + path, handler: (req, res) => answer(res, () => handler(req, res)) }), `aurabot: 路由 ${path}`)
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'prefix',
+    path: PREFIX, // DSH 按「路径 = 前缀 或 以 前缀/ 开头」匹配，前缀本身不带结尾的 /
+    handler: (req, res) => answer(res, () => {
+      let path = ''
+      try { path = new URL(req.url, 'http://x').pathname } catch (error) {}
+      return mods.handle(path, req, res)
+    }),
+  }), 'aurabot: 模块接口')
+
+  // ---------- 模块 ----------
+  const core = {
+    hub, onebot, snowluma, local, groupRoles, mutes, logger, bridge: null,
+    root: ROOT,
+    ask: (opts) => askModel(ctx, { cfg: getConfig(), ...opts }),
+    listModels,
+    defaultModel: () => defaultModel(ctx, { model: {} }),
+    http: { body: readBody, raw: readRaw, query, send },
+    personas: { list: listPersonas, read: readPersona, current: () => currentPersonaText(cfg.persona.current) },
+    getConfig, setConfig,
+  }
+  mods = createModules({ ctx, core, getConfig, setConfig, logger, version: VERSION, builtins: BUILTINS })
+  bridge = createBridge({ ctx, getConfig, setConfig, hub, mods, log: logger.child('bridge'), version: VERSION, apiVersion: API_VERSION, overview: () => overview() })
+  core.bridge = bridge
+  core.modules = mods
+  const booted = mods.boot()
+  booted.then(() => bridge.refresh())
 
   // ---------- 盯会话：一轮结束就发回 QQ ----------
   ctx.effect(() => {
@@ -227,60 +279,14 @@ export function apply(ctx) {
   }
   const safe = (fn, label) => () => { Promise.resolve().then(fn).catch((error) => log.warn(`${label}出错：`, error.message)) }
   ctx.effect(() => ctx.interval(safe(watchdog, '看门狗'), 30_000), 'aurabot: 看门狗')
-  ctx.effect(() => ctx.interval(safe(() => qzone.tick(), '空间日记'), 60_000), 'aurabot: 空间日记')
-  ctx.effect(() => ctx.interval(safe(() => speakUp.tick(), '主动搭话'), 60_000), 'aurabot: 主动搭话')
-  ctx.effect(() => ctx.interval(safe(() => qzoneSocial.tick(), '空间互动'), 60_000), 'aurabot: 空间互动')
-  ctx.effect(() => ctx.interval(safe(() => bili.tick(), '刷B站'), 60_000), 'aurabot: 刷B站')
-  ctx.effect(() => ctx.interval(safe(() => memory.tick(), '整理记忆'), 60_000), 'aurabot: 每日整理记忆')
   setTimeout(safe(watchdog, '看门狗'), 3000).unref?.()
   ctx.effect(() => () => {
+    mods.dispose()
     onebot.stop()
     snowluma.dispose()
   }, 'aurabot: 收尾')
 
   // ---------- 面板接口 ----------
-  const send = (res, code, body, type = 'application/json; charset=utf-8') => {
-    try {
-      res.statusCode = code
-      res.setHeader?.('content-type', type)
-      res.setHeader?.('cache-control', 'no-store')
-      res.end?.(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body))
-    } catch (error) {}
-  }
-  const readBody = async (req) => {
-    let s = ''
-    try { for await (const c of req) s += c } catch (error) {}
-    try { return JSON.parse(s || '{}') } catch (error) { return {} }
-  }
-  /** 原样读请求体（上传大文件用），超过 max 字节就报错。 */
-  const readRaw = async (req, max) => {
-    const parts = []
-    let n = 0
-    for await (const c of req) {
-      const b = Buffer.isBuffer(c) ? c : Buffer.from(c)
-      n += b.length
-      if (n > max) throw new Error(`文件太大了（最多 ${Math.round(max / 1024 / 1024)}MB）`)
-      parts.push(b)
-    }
-    return Buffer.concat(parts)
-  }
-  const query = (req) => {
-    try { return Object.fromEntries(new URL(req.url, 'http://x').searchParams) } catch (error) { return {} }
-  }
-  const route = (path, handler) =>
-    ctx.effect(() => ctx.webServer.register({
-      kind: 'exact',
-      path: PREFIX + path,
-      handler: async (req, res) => {
-        try {
-          const r = await handler(req, res)
-          if (r !== undefined) send(res, 200, r)
-        } catch (error) {
-          send(res, 200, { ok: false, message: redact(String(error && error.message ? error.message : error)) })
-        }
-      },
-    }), `aurabot: 路由 ${path}`)
-
   let consentCache = { at: 0, value: null }
   async function consented(running) {
     if (!running) return null
@@ -301,26 +307,31 @@ export function apply(ctx) {
         login = { uin: String(info?.user_id ?? ''), nickname: info?.nickname || '' }
       } catch (error) {}
     }
-    const lib = stickers.library()
+    const diary = use('diary')
+    const memory = use('memory')
     return {
       ok: true,
       version: VERSION,
+      apiVersion: API_VERSION,
       config: publicConfig(cfg),
       onebot: { state: onebotState, login, endpoint: { httpUrl: endpoint().httpUrl, wsUrl: endpoint().wsUrl } },
       snowluma: { ...inst, running, consented: await consented(running), owns: snowluma.ownsProcess, lastAttach: snowluma.lastAttach, downloadPage: DOWNLOAD_PAGE, webui: snowluma.webuiUrl() },
       stats: hub.stats(),
-      mood: mood.state(),
-      stickers: { count: lib.items.length },
-      diary: { next: qzone.nextTime(), last: qzone.history()[0] || null },
-      qzoneSocial: qzoneSocial.state(),
-      speakUp: speakUp.state(),
-      memory: { lastConsolidate: memory.lastConsolidate() },
+      // 模块关着时给个空壳，面板照常显示
+      mood: use('mood')?.state?.() ?? { value: 0, label: '心情模块关着', reason: '', history: [] },
+      stickers: { count: stickers.library().items.length },
+      diary: diary ? { next: diary.nextTime(), last: diary.history()[0] || null } : { next: 0, last: null },
+      qzoneSocial: use('qzone-social')?.state?.() ?? null,
+      speakUp: use('speakup')?.state?.() ?? { count: 0 },
+      memory: { lastConsolidate: memory?.lastConsolidate?.() ?? 0 },
       avatar: avatarInfo(),
-      voice: { edgeInstalled: edgeInstalled() },
-      song: song.status(),
+      voice: { edgeInstalled: use('voice')?.edgeInstalled?.() ?? false },
+      song: use('song')?.status?.() ?? null,
       sessions: hub.sessions(),
       workspaceDir: WORKSPACE_DIR,
       personas: listPersonas(),
+      modules: mods.status(),
+      bridge: { dshTools: cfg.bridge.dshTools, http: cfg.bridge.http, hasToken: Boolean(cfg.bridge.token), tools: bridge.deniedTools(), toolsService: Boolean(ctx.get?.('tools')) },
     }
   }
 
@@ -335,6 +346,7 @@ export function apply(ctx) {
     if (!before.enabled && cfg.enabled) setTimeout(safe(watchdog, '看门狗'), 100)
     if (before.enabled && !cfg.enabled) onebot.stop()
     log.info(`设置已保存｜总开关 ${cfg.enabled ? '开' : '关'}｜试运行 ${cfg.dryRun ? '开' : '关'}`)
+    await mods.sync().catch(() => {})
     return { ...(await overview()), message: '保存好了' }
   })
 
@@ -347,50 +359,14 @@ export function apply(ctx) {
   route('/snowluma/start', async () => snowluma.start())
   route('/snowluma/stop', async () => snowluma.stop())
   route('/snowluma/attach', async () => snowluma.attachBot())
-  route('/commands', async () => ({ ok: true, list: commandList() }))
+  route('/commands', async () => ({ ok: true, list: commandList(mods.commands()) }))
   // 更新：检查 GitHub 上有没有新版本；这次更新了什么
   const checkUpdate = createUpdateChecker({ pkg: PKG, log })
-  route('/update/check', async (req) => checkUpdate({ force: new URL(req.url, 'http://x').searchParams.get('force') === '1' }))
+  route('/update/check', async (req) => checkUpdate({ force: query(req).force === '1' }))
   route('/changelog', async () => {
     let text = ''
     try { text = readFileSync(join(ROOT, 'CHANGELOG.md'), 'utf8') } catch (error) {}
     return { ok: true, version: VERSION, notes: changelogSection(text, VERSION) }
-  })
-  // 翻唱
-  route('/song/status', async () => ({ ok: true, ...song.status() }))
-  route('/song/install', async () => song.install())
-  route('/song/root/check', async (req) => ({ ok: true, ...checkRoot(query(req).path || '') }))
-  route('/song/drives', async () => ({ ok: true, list: listDrives() }))
-  route('/song/search', async (req) => {
-    const q = new URL(req.url, 'http://x').searchParams.get('q') || ''
-    try { return { ok: true, list: await song.search(q) } } catch (error) { return { ok: false, message: error.message, list: [] } }
-  })
-  route('/song/account', async () => song.account())
-  // 导入音色：面板把文件原样传上来（.zip / .pth / .index），文件名放在 ?name= 里
-  route('/song/import', async (req) => {
-    const name = query(req).name || ''
-    try {
-      const buf = await readRaw(req, 1024 * 1024 * 1024)
-      if (!buf.length) return { ok: false, message: '文件是空的' }
-      const r = song.importModels(name, buf)
-      if (r.ok) log.info('导入音色：' + r.message)
-      return r
-    } catch (error) {
-      return { ok: false, message: '导入失败：' + error.message }
-    }
-  })
-  route('/song/voice/delete', async (req) => song.deleteVoice(String((await readBody(req)).id || '')))
-  route('/song/request', async (req) => {
-    const b = await readBody(req)
-    // 面板里试唱：发到主人私聊
-    return song.request({ song: b.song, songId: b.songId, pitch: b.pitch, voice: b.voice, chatId: b.chatId || `private:${cfg.ownerQQ}` })
-  })
-  route('/groups/roles', async () => {
-    const list = await Promise.all(cfg.allow.groups.map(async (gid) => {
-      const role = await groupRoles.get(gid, { fresh: true })
-      return { groupId: gid, name: await hub.groupName(String(gid)), role, label: role ? groupRoles.label(role) : '查不到（她在群里吗？）', canManage: groupRoles.canManage(role) }
-    }))
-    return { ok: true, list }
   })
   route('/snowluma/login-check', async () => ({ ...(await snowluma.canLogin()), passwordAuto: cfg.snowluma.passwordAuto, running: await snowluma.running() }))
   route('/snowluma/agreements', async () => {
@@ -462,50 +438,19 @@ export function apply(ctx) {
     return { ok: true, current: b.id, message: '切换好了，下一轮回复起生效' }
   })
 
-  // 表情
-  route('/stickers', async () => ({ ok: true, items: stickers.library().items.slice().reverse() }))
-  route('/sticker/image', async (req, res) => {
-    const it = stickers.library().items.find((i) => i.md5 === query(req).md5)
-    if (!it || !existsSync(stickerPath(it))) return send(res, 404, '')
-    const ext = it.file.split('.').pop()
-    send(res, 200, readFileSync(stickerPath(it)), ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/jpeg')
-  })
-  route('/sticker/rename', async (req) => {
-    const b = await readBody(req)
-    return stickers.rename(b.md5, b.name, Array.isArray(b.tags) ? b.tags : undefined)
-  })
-  route('/sticker/delete', async (req) => {
-    const b = await readBody(req)
-    return stickers.remove(b.md5, { fromQQ: b.fromQQ !== false })
-  })
-  route('/sticker/upload', async (req) => {
-    const b = await readBody(req)
-    const buf = Buffer.from(String(b.data || '').replace(/^data:[^,]+,/, ''), 'base64')
-    if (!buf.length || buf.length > 5 * 1024 * 1024) return { ok: false, message: '图片太大或是空的' }
-    return stickers.addFromBuffer(buf, { name: b.name || '', tags: b.tags || [], from: 'panel' })
-  })
-
-  // 空间
-  route('/diary/run', async (req) => {
-    const b = await readBody(req)
-    return qzone.writeDiary({ visibility: b.visibility })
-  })
-  route('/diary/history', async () => ({ ok: true, items: qzone.history(), next: qzone.nextTime() }))
-  route('/qzone/social/run', async () => qzoneSocial.run({ force: true }))
   // 本地接口
+  const openFolder = (dir) => {
+    mkdirSync(dir, { recursive: true })
+    spawn('explorer.exe', [dir], { detached: true, stdio: 'ignore' }).unref()
+    return { ok: true, message: '打开了' }
+  }
   route('/local/status', async () => ({ ok: true, dir: local.dir(), list: local.status() }))
   route('/local/template', async (req) => {
     const slot = String((await readBody(req)).slot || '')
     if (!local.pathOf || !['tts', 'image', 'song', 'asr'].includes(slot)) return { ok: false, message: '没有这一项' }
     return local.template(slot)
   })
-  route('/local/open', async () => {
-    const { mkdirSync } = await import('node:fs')
-    mkdirSync(local.dir(), { recursive: true })
-    const { spawn } = await import('node:child_process')
-    spawn('explorer.exe', [local.dir()], { detached: true, stdio: 'ignore' }).unref()
-    return { ok: true, message: '打开了' }
-  })
+  route('/local/open', async () => openFolder(local.dir()))
   route('/local/test', async (req) => {
     const slot = String((await readBody(req)).slot || '')
     try {
@@ -515,7 +460,6 @@ export function apply(ctx) {
         return { ok: true, message: `念好了：${file}` }
       }
       if (slot === 'image') {
-        const { toImageBuffer } = await import('./local/local.js')
         const buf = await toImageBuffer(await local.call('image', { prompt: '一条胖乎乎的蓝色小鱼，可爱，插画', size: cfg.imageGen.size || '1024x1024' }))
         return { ok: true, message: `画好了（${Math.round(buf.length / 1024)} KB）`, image: buf.toString('base64') }
       }
@@ -524,75 +468,107 @@ export function apply(ctx) {
       return { ok: false, message: '出错了：' + error.message }
     }
   })
-  // B 站
-  route('/bili/state', async () => ({ ok: true, ...bili.state(), account: await bili.account() }))
-  route('/bili/account', async () => bili.account(true))
-  route('/bili/run', async () => bili.run({ force: true }))
-  route('/bili/replies', async () => bili.checkReplies())
-  // 截图库（面板里看全部、手动删）
-  route('/bili/shots', async () => ({ ...bili.libraryShots(), limit: cfg.bili.shotLibrary }))
-  route('/bili/shot/image', async (req, res) => {
-    const p = bili.shotFileOf(query(req).file)
-    if (!p) return send(res, 404, '')
-    send(res, 200, readFileSync(p), 'image/jpeg')
+
+  // 模块（面板「扩展」页）
+  route('/modules', async () => ({ ok: true, dir: mods.dir(), safeMode: cfg.safeMode, apiVersion: API_VERSION, list: mods.status(), prompt: mods.promptFor('') }))
+  route('/modules/reload', async (req) => {
+    const id = String((await readBody(req)).id || '')
+    if (!id) { await mods.sync(); return { ok: true, message: '检查过了', list: mods.status() } }
+    const m = await mods.reload(id)
+    return { ok: Boolean(m && !m.error), message: m?.error ? '加载失败：' + m.error : '重新加载好了', list: mods.status() }
   })
-  route('/bili/shot/delete', async (req) => bili.deleteShot(String((await readBody(req)).file || '')))
-  route('/qzone/social/state', async () => ({ ok: true, ...qzoneSocial.state() }))
-  route('/qzone/delete', async (req) => {
+  route('/modules/create', async (req) => {
     const b = await readBody(req)
-    await qzone.remove(b.tid)
-    return { ok: true, message: '删掉了' }
+    const r = mods.create(String(b.id || '').trim(), String(b.name || '').trim())
+    if (r.ok) await mods.sync()
+    return { ...r, list: mods.status(), prompt: r.ok ? mods.promptFor(String(b.id).trim()) : '' }
+  })
+  route('/modules/fork', async (req) => {
+    const id = String((await readBody(req)).id || '')
+    const r = mods.fork(id)
+    if (r.ok) await mods.sync()
+    return { ...r, list: mods.status(), prompt: r.ok ? mods.promptFor(id) : '' }
+  })
+  route('/modules/prompt', async (req) => ({ ok: true, prompt: mods.promptFor(String(query(req).id || '')) }))
+  route('/modules/open', async (req) => {
+    const id = String(query(req).id || '')
+    return openFolder(id ? join(mods.dir(), id) : mods.dir())
+  })
+  // 模拟测试：不用上 QQ 就能试模块。发出去的消息只截下来给面板看，不真发
+  // （模块直接调 api.onebot(...) 的操作不在此列，是真的会执行的）
+  const simChat = (b) => {
+    const owner = b.as !== 'other'
+    const userId = owner ? cfg.ownerQQ : '10001'
+    const group = b.kind === 'group'
+    const groupId = String(b.groupId || cfg.allow.groups[0] || '10002')
+    return { owner, userId, chat: group ? { chatId: `group:${groupId}`, kind: 'group', groupId, userId } : { chatId: `private:${userId}`, kind: 'private', userId } }
+  }
+  // 没有文字的（语音条、表情、图片）显示发送备注，比如「[语音·edge] 早呀」
+  const sentLines = (sent) => sent.map((s) => ({ chatId: s.chatId, note: s.note, text: s.message.some((seg) => seg.type === 'text') ? s.message.map((seg) => (seg.type === 'text' ? seg.data.text : seg.type === 'reply' ? '' : `[${seg.type}]`)).join('') : s.note }))
+  route('/modules/simulate', async (req) => {
+    const b = await readBody(req)
+    const { owner, userId, chat } = simChat(b)
+    const text = String(b.text || '')
+    const steps = []
+    const msg = { ...chat, nickname: owner ? cfg.ownerName || '主人' : '路人', role: '', messageId: 'sim', text, mentioned: Boolean(b.mentioned), replyId: '', images: [], stickers: [], records: [], forwards: [], raw: { simulated: true } }
+    const { sent } = await hub.capture(async () => {
+      if (text) {
+        const cmd = owner && /^\s*[/／]/.test(text) ? parseCommand(text, mods.commands()) : null
+        if (cmd && cmd.ext) {
+          const reply = String((await cmd.ext.run(cmd.arg, msg)) ?? '')
+          steps.push(`命令 /${cmd.name}（模块「${cmd.ext.module}」）回：${reply || '（空）'}`)
+          if (reply) await hub.sendText(chat.chatId, reply)
+        } else if (cmd) {
+          steps.push(`这是内置命令 /${cmd.name}，模拟里不执行（会真的改设置）`)
+        } else if (await mods.claim('message', msg)) {
+          steps.push('有模块接管了这条消息，她不会再回')
+        } else {
+          steps.push('没有模块接管，这条会交给她（模拟里不会真的让她想）')
+        }
+      }
+      if (b.reply) {
+        const items = await hub.deliver(chat.chatId, String(b.reply), { simulate: true })
+        steps.push(items ? `她的回复经过模块改写后拆成 ${items.length} 条` : '她的回复被模块拦下了，不发')
+      }
+    })
+    return { ok: true, steps, sent: sentLines(sent) }
+  })
+  route('/modules/tools', async (req) => {
+    const q = query(req)
+    const { owner, chat } = simChat(q)
+    const level = owner && chat.kind === 'private' ? 'full' : 'social'
+    return { ok: true, level, list: mods.buildTools({ chat, level, sessionId: 'sim' }).map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })) }
+  })
+  route('/modules/tool', async (req) => {
+    const b = await readBody(req)
+    const { owner, userId, chat } = simChat(b)
+    const level = owner && chat.kind === 'private' ? 'full' : 'social'
+    const tool = mods.buildTools({ chat, level, sessionId: 'sim' }).find((t) => t.name === b.name)
+    if (!tool) return { ok: false, message: `这个场合没有 ${b.name} 这个工具` }
+    hub.simulateTurn('sim', [userId])
+    const { result, sent } = await hub.capture(() => tool.execute(b.args && typeof b.args === 'object' ? b.args : {}, {}))
+    return { ok: true, result, sent: sentLines(sent) }
+  })
+  route('/modules/panel', async (req, res) => {
+    const src = mods.panelSource(String(query(req).id || ''))
+    if (src === null) return send(res, 404, '')
+    send(res, 200, src, 'text/javascript; charset=utf-8')
   })
 
-  // 语音
-  route('/voice/test', async (req) => {
-    const b = await readBody(req)
-    const { file, engine } = await tts.speak(String(b.text || '你好呀，我是大肥鱼'))
-    const buf = readFileSync(file)
-    return { ok: true, engine, mime: file.endsWith('.wav') ? 'audio/wav' : 'audio/mpeg', data: buf.toString('base64') }
+  // 联动
+  route('/bridge/token', async () => ({ ok: true, token: cfg.bridge.http ? bridge.ensureToken() : '' }))
+  route('/bridge/token/reset', async () => ({ ok: true, token: bridge.resetToken(), message: '换了新密钥，旧的立刻失效' }))
+  route('/bridge/examples', async (req) => ({ ok: true, ...bridge.examples(String(query(req).base || 'http://127.0.0.1:端口')) }))
+  // 开放接口：都要带密钥
+  const open = (path, fn) => route('/open' + path, async (req) => {
+    if (!bridge.authorized(req)) return { ok: false, code: 401, message: cfg.bridge.http ? '密钥不对（请求头 Authorization: Bearer 密钥）' : '开放接口没打开（面板「扩展」→ 联动）' }
+    return fn(req)
   })
-  route('/voice/install', async () => installEdge(logger.child('voice')))
-  // DSH 自带语音识别：看状态 / 下载模型
-  route('/voice/asr-status', async () => {
-    const stt = ctx.get('speechToText')
-    if (!stt || typeof stt.snapshot !== 'function') return { ok: false, enabled: false, message: 'DSH 里没有开启「语音输入」插件' }
-    const s = stt.snapshot()
-    const p = s.providers.find((x) => x.id === s.selection.providerId) || s.providers[0]
-    return { ok: true, enabled: true, provider: p?.id, phase: p?.preparation?.phase || 'ready', detail: p?.preparation }
-  })
-  route('/voice/asr-prepare', async () => {
-    const stt = ctx.get('speechToText')
-    if (!stt || typeof stt.snapshot !== 'function') return { ok: false, message: 'DSH 里没有开启「语音输入」插件' }
-    const s = stt.snapshot()
-    stt.prepare(s.selection.providerId)
-    return { ok: true, message: '开始下载识别模型（约 200MB，下好后常驻本机）' }
-  })
-  // 自检「听语音」（真 QQ）：拿和某人私聊里最近一条语音，走一遍 get_record → 16k → DSH 识别
-  route('/voice/asr-last', async (req) => {
-    const b = await readBody(req)
-    const uid = Number(b.userId || cfg.ownerQQ)
-    const h = await onebot.call('get_friend_msg_history', { user_id: uid, count: 30 })
-    const recs = (h?.messages || []).filter((m) => String(m.user_id) === String(uid)).flatMap((m) => (m.message || []).filter((s) => s.type === 'record').map((s) => ({ seg: s, time: m.time })))
-    const last = recs.at(-1)
-    if (!last) return { ok: false, message: '最近的聊天里没有对方发的语音' }
-    const t = Date.now()
-    const text = await hub.localTranscribe(last.seg)
-    return { ok: Boolean(text), heard: text, at: new Date(last.time * 1000).toLocaleString(), ms: Date.now() - t }
-  })
-  // 自检「听语音」：Windows 语音念一句 → 转 16k 单声道 → DSH 自带识别 → 看能不能认回来
-  route('/voice/asr-test', async (req) => {
-    const b = await readBody(req)
-    const stt = ctx.get('speechToText')
-    if (!stt || typeof stt.resolve !== 'function') return { ok: false, message: 'DSH 里没有开启语音识别（设置 → 插件 → 语音输入）' }
-    const text = String(b.text || '今天想吃白米饭')
-    const { file } = await textToSpeech(text, { engine: 'windows' })
-    const { toMono16k } = await import('./voice/wav.js')
-    const t = Date.now()
-    const spec = stt.resolve({ audio: new Uint8Array(toMono16k(readFileSync(file))) })
-    const r = await stt.transcribe(spec, AbortSignal.timeout(120000))
-    const heard = typeof r === 'string' ? r : r?.text || r?.transcript || JSON.stringify(r)
-    return { ok: Boolean(heard), said: text, heard, ms: Date.now() - t }
-  })
+  open('/info', async () => bridge.ops.info())
+  open('/send', async (req) => bridge.ops.send(await readBody(req)))
+  open('/think', async (req) => bridge.ops.think(await readBody(req)))
+  open('/call', async (req) => bridge.ops.call(await readBody(req)))
+  open('/events', async (req) => bridge.ops.events(query(req)))
 
   // 模型：列出 DSH 里可用的模型，测一下哪个回得快
   route('/models', async () => {
@@ -606,72 +582,11 @@ export function apply(ctx) {
     const b = await readBody(req)
     const t = Date.now()
     try {
-      const { askModel } = await import('./core/llm.js')
       const text = await askModel(ctx, { cfg: { model: { provider: b.provider, model: b.model } }, system: '只回复两个字：在呢', text: '在吗', maxTokens: 800 })
       return { ok: true, ms: Date.now() - t, text: text.slice(0, 40) }
     } catch (error) {
       return { ok: false, ms: Date.now() - t, message: error.message }
     }
-  })
-
-  // 记忆 / 心情 / 主动搭话
-  route('/memories', async (req) => ({ ok: true, items: memory.list(query(req).q || '').slice(0, 300), stats: memory.stats() }))
-  route('/memory/add', async (req) => {
-    const b = await readBody(req)
-    return memory.add({ text: b.text, aboutName: b.aboutName || '', about: b.about || '', importance: b.importance ?? 0.6, tags: b.tags || [], source: 'panel' })
-  })
-  route('/memory/update', async (req) => {
-    const b = await readBody(req)
-    return memory.update(b.id, b)
-  })
-  route('/memory/delete', async (req) => {
-    const b = await readBody(req)
-    return memory.remove(b.id)
-  })
-  route('/insights', async () => ({ ok: true, items: memory.insights(), styles: memory.styles() }))
-  route('/memory/recalls', async () => ({ ok: true, list: memory.recalls() }))
-  route('/memory/restore', async (req) => memory.restore((await readBody(req)).id))
-  route('/profiles', async () => ({ ok: true, list: memory.profiles() }))
-  route('/profiles/save', async (req) => {
-    const b = await readBody(req)
-    memory.setProfile(String(b.qq || ''), String(b.text || ''))
-    return { ok: true, message: b.text ? '小档案已保存' : '小档案已清空' }
-  })
-  route('/profiles/rebuild', async (req) => {
-    const b = await readBody(req)
-    try {
-      return (await memory.buildProfile(String(b.qq || ''))) ? { ok: true, message: '按记忆重写好了' } : { ok: false, message: '关于 TA 的记忆还太少（至少 3 条）' }
-    } catch (error) {
-      return { ok: false, message: error.message }
-    }
-  })
-  route('/memory/import', async (req) => {
-    const b = await readBody(req)
-    try { return { ok: true, list: await memory.importCandidates(String(b.text || '').slice(0, 30000)) } } catch (error) { return { ok: false, message: error.message, list: [] } }
-  })
-  route('/memory/import/commit', async (req) => {
-    const n = memory.importCommit((await readBody(req)).items || [])
-    return { ok: true, message: `存进记忆库 ${n} 条` }
-  })
-  route('/style/save', async (req) => {
-    const b = await readBody(req)
-    memory.setStyle(String(b.key || ''), (b.list || []).map((t) => String(t).trim()).filter(Boolean))
-    return { ok: true, message: '说话方式已保存' }
-  })
-  route('/insights/save', async (req) => {
-    const b = await readBody(req)
-    memory.setInsights(String(b.key || ''), (b.list || []).map((t) => String(t).trim()).filter(Boolean))
-    return { ok: true, message: '相处经验已保存' }
-  })
-  route('/memory/extract', async (req) => {
-    const b = await readBody(req)
-    // 立即整理一次：连今天的也提炼（今天的聊天流水不删，写日记还要用）
-    return memory.consolidate({ includeToday: b.includeToday !== false })
-  })
-  route('/speakup/fire', async () => {
-    if (!cfg.enabled) return { ok: false, message: '先打开总开关' }
-    await speakUp.fire('手动')
-    return { ok: true, message: '叫她去找你了' }
   })
 
   // 形象图
@@ -715,5 +630,11 @@ export function apply(ctx) {
 
   log.info(`Aurabot v${VERSION} 已加载｜总开关 ${cfg.enabled ? '开' : '关'}｜试运行 ${cfg.dryRun ? '开' : '关'}｜工作区 ${WORKSPACE_DIR}`)
 
-  return { hub, onebot, snowluma, stickers, qzone, mood, memory, getConfig, setConfig, logger }
+  return {
+    hub, onebot, snowluma, getConfig, setConfig, logger, modules: mods, bridge, ready: booted,
+    get stickers() { return use('stickers') },
+    get qzone() { return use('diary') },
+    get mood() { return use('mood') },
+    get memory() { return use('memory') },
+  }
 }

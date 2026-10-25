@@ -80,8 +80,8 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected }) 
   async function chooseKeywords() {
     const c = cfg()
     const interests = [...(c.keywords || []), ...(getConfig().group.interests || [])]
-    const about = memory ? memory.list('').filter((m) => String(m.about) === String(getConfig().ownerQQ) || /喜欢|爱|想|在玩|在看|追/.test(m.text)).slice(0, 12).map((m) => m.text) : []
-    const recent = memory ? memory.recentEvents(72, 6).filter((m) => (m.tags || []).includes('B站')).map((m) => m.text) : []
+    const about = (memory?.list?.('') || []).filter((m) => String(m.about) === String(getConfig().ownerQQ) || /喜欢|爱|想|在玩|在看|追/.test(m.text)).slice(0, 12).map((m) => m.text)
+    const recent = (memory?.recentEvents?.(72, 6) || []).filter((m) => (m.tags || []).includes('B站')).map((m) => m.text)
     try {
       const out = await think(`你想去 B 站刷点视频。你感兴趣的：${interests.join('、') || '随便看看'}。\n你记得的关于${owner()}和大家的事：\n${about.map((t) => '- ' + t).join('\n') || '（暂无）'}\n最近刷过的：\n${recent.map((t) => '- ' + t).join('\n') || '（暂无）'}\n\n挑 3 个这次想搜的关键词（可以是你自己想看的，也可以是${owner()}可能喜欢、你想分享给${owner()}的），别和最近刷过的重复。只输出 JSON 数组，例如 ["白米饭 做法","猫咪 搞笑"]。`)
       const arr = pickJson(out, []).map((k) => String(k).trim()).filter(Boolean)
@@ -207,8 +207,8 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected }) 
         const v = x.info
         const feeling = String(d.feeling || '').trim()
         if (feeling) felt.set(v.bvid, feeling)
-        memory?.addEvent({ text: `在B站看了《${v.title}》（UP主 ${v.author}）${feeling ? '：' + feeling.slice(0, 60) : ''}`, tags: ['B站'], importance: 0.4 })
-        if (d.remember && !isSilence(d.remember)) memory?.add({ text: String(d.remember).slice(0, 200), tags: ['B站'], importance: 0.5, source: 'event' })
+        memory?.addEvent?.({ text: `在B站看了《${v.title}》（UP主 ${v.author}）${feeling ? '：' + feeling.slice(0, 60) : ''}`, tags: ['B站'], importance: 0.4 })
+        if (d.remember && !isSilence(d.remember)) memory?.add?.({ text: String(d.remember).slice(0, 200), tags: ['B站'], importance: 0.5, source: 'event' })
         const comment = String(d.comment || '').trim()
         if (comment && !isSilence(comment) && commented < commentLeft && canPost(s)) {
           try {
@@ -216,7 +216,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected }) 
             else await api.postComment(v.aid, comment.slice(0, 200))
             commented++
             s.comments++
-            memory?.addEvent({ text: `在B站《${v.title}》下评论：${comment.slice(0, 60)}`, tags: ['B站'], importance: 0.4 })
+            memory?.addEvent?.({ text: `在B站《${v.title}》下评论：${comment.slice(0, 60)}`, tags: ['B站'], importance: 0.4 })
             record(s, { kind: 'comment', title: v.title, bvid: v.bvid, text: comment })
           } catch (error) {
             log.warn('B 站评论失败：', error.message)
@@ -291,7 +291,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected }) 
           else await api.postComment(x.oid, `回复 @${x.name} :${reply}`.slice(0, 200), { root: x.root, parent: x.parent })
           s.replies++
           n++
-          memory?.addEvent({ text: `在B站回复了 ${x.name}：${reply.slice(0, 50)}`, tags: ['B站'], importance: 0.35 })
+          memory?.addEvent?.({ text: `在B站回复了 ${x.name}：${reply.slice(0, 50)}`, tags: ['B站'], importance: 0.35 })
           record(s, { kind: 'reply', title: x.title, text: `${x.name}：${x.text} → ${reply}` })
         } catch (error) {
           log.warn('B 站回复失败：', error.message)
@@ -317,7 +317,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected }) 
       if (!id || id.short) return { ok: false, message: '短链打不开' }
     }
     const x = await lookAt(id)
-    memory?.addEvent({ text: `看了别人发来的 B 站视频《${x.info.title}》`, tags: ['B站'], importance: 0.4 })
+    memory?.addEvent?.({ text: `看了别人发来的 B 站视频《${x.info.title}》`, tags: ['B站'], importance: 0.4 })
     return { ok: true, message: x.digest, bvid: x.info.bvid, aid: x.info.aid, title: x.info.title }
   }
 
@@ -327,7 +327,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected }) 
     if (!w.ok) return w
     if (getConfig().dryRun) return { ok: true, message: `试运行：本来要在《${w.title}》下评论：${message}` }
     await api.postComment(w.aid, String(message).slice(0, 200))
-    memory?.addEvent({ text: `在B站《${w.title}》下评论：${String(message).slice(0, 60)}`, tags: ['B站'], importance: 0.45 })
+    memory?.addEvent?.({ text: `在B站《${w.title}》下评论：${String(message).slice(0, 60)}`, tags: ['B站'], importance: 0.45 })
     const s = load(); record(s, { kind: 'comment', title: w.title, bvid: w.bvid, text: message }); save(s)
     return { ok: true, message: `评论发出去了（《${w.title}》）` }
   }
