@@ -927,10 +927,18 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
 
     function StickerCell({ it, onChanged, toast }) {
       const [name, setName] = useState(it.name || '')
+      // 名字可能是别处改的（她在 QQ 里自己改、或者另一个窗口改的）：props 变了要跟着更新。
+      // 不更新的话刷新后面板还显示旧名字，而且输入框一失焦就会把旧名字提交回去，覆盖掉刚改好的。
+      useEffect(() => { setName(it.name || '') }, [it.name])
       return h('div', { className: 'ab-sticker' },
         h('img', { src: API + '/sticker/image?md5=' + it.md5, alt: it.name || '表情', loading: 'lazy' }),
         h('input', { className: 'nm', value: name, placeholder: '未命名', maxLength: 12, onChange: (e) => setName(e.target.value),
-          onBlur: async () => { if (name !== (it.name || '')) { await post('/sticker/rename', { md5: it.md5, name }); toast('改好了') } } }),
+          onBlur: async () => {
+            if (name === (it.name || '')) return
+            await post('/sticker/rename', { md5: it.md5, name })
+            toast('改好了')
+            onChanged()
+          } }),
         h('div', { className: 'tg' }, (it.tags || []).join(' · ')),
         h('button', { type: 'button', className: 'ab-btn sm danger x', title: '删除', onClick: async () => { if (!confirm('删掉这张表情？（QQ 收藏里也会删）')) return; await post('/sticker/delete', { md5: it.md5 }); onChanged() } }, '✕'),
       )
