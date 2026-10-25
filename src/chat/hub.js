@@ -595,11 +595,14 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       }
       if (!text) return release(chatId)
       // 只让「这个聊天当前在用的那条会话」把回复发出去。
-      // 切过调试/正式、或者点过「重新开始」之后，旧会话可能还开在侧栏里 ——
-      // 你在那儿打字，她的回复也不该发到 QQ 上。
+      // 判断两件事：① 它是不是 sessions.json 里当前记的那条；② 它的 mode 和现在的模式是否一致。
+      // 第二条很关键：刚切了调试/正式、还没收到新消息时，映射还停在旧会话上 ——
+      // 那时候在旧会话里打字，也不该把回复发到 QQ。
       const cur = map().chats[chatId]
-      if (!cur || sessionKey(cur.sessionId) !== key) {
-        log.info(`${chatId} 的旧会话（${key.slice(0, 8)}…）这一轮不发：它已经不是当前在用的会话了`)
+      const mode = getConfig().debug ? 'debug' : 'live'
+      const stale = !cur || sessionKey(cur.sessionId) !== key || (cur.mode || 'live') !== mode
+      if (stale) {
+        log.info(`${chatId} 的旧会话（${key.slice(0, 8)}…）这一轮不发：它不是当前模式在用的会话`)
         return release(chatId)
       }
       // 发完再放开：发送期间来的消息也攒到下一段
