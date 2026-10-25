@@ -145,17 +145,20 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   async function createSession(chat, level) {
     const ws = await ensureWorkspace()
     const preset = presetFor(level)
+    const debug = getConfig().debug
+    // 调试会话和正式会话分开，标题也标出来，免得在侧栏里点错
+    const title = titleFor(chat) + (debug ? '（调试）' : '')
     const r = await controller().create({ workspaceId: ws.id, agentPreset: preset })
     const sid = String(r.sessionId)
     try {
-      await controller().rename({ sessionId: sid, title: titleFor(chat) })
+      await controller().rename({ sessionId: sid, title })
     } catch (error) {
       log.debug('改会话标题失败：', error.message)
     }
     const m = map()
-    m.chats[chat.chatId] = { sessionId: sid, preset, level, createdAt: Date.now(), title: titleFor(chat), mode: getConfig().debug ? 'debug' : 'live' }
+    m.chats[chat.chatId] = { sessionId: sid, preset, level, createdAt: Date.now(), title, mode: debug ? 'debug' : 'live' }
     saveMap(m)
-    log.info(`为 ${chat.chatId} 新建了 DSH 会话 ${sid.slice(-8)}（${preset}）`)
+    log.info(`为 ${chat.chatId} 新建了 DSH 会话 ${sid.slice(-8)}（${preset}${debug ? '，调试' : ''}）`)
     return sid
   }
 
@@ -210,6 +213,22 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     sessionToChat.set(sessionKey(sid), chat.chatId)
     mount(agent, chat, level)
     return { agent, sessionId: sid, level }
+  }
+
+  /**
+   * 调试模式：把主人私聊的调试会话先建出来。
+   * 否则要等你先发一条 QQ 消息，侧栏里才会有会话可点 —— 而调试本来就是为了不碰 QQ。
+   */
+  async function ensureDebugSession() {
+    const cfg = getConfig()
+    if (!cfg.debug) return { ok: false, message: '没开调试模式' }
+    if (!cfg.ownerQQ) return { ok: false, message: '还没填主人 QQ' }
+    const chat = { kind: 'private', chatId: `private:${cfg.ownerQQ}`, userId: String(cfg.ownerQQ), groupId: '', nickname: cfg.ownerName || '主人' }
+    const before = map().chats[chat.chatId]
+    const existed = Boolean(before && (before.mode || 'live') === 'debug')
+    const r = await agentFor(chat)
+    if (!existed) log.info(`调试会话建好了：${r.sessionId.slice(-8)}（在左侧栏「Aurabot · QQ」里打开就能直接跟她说话）`)
+    return { ok: true, sessionId: r.sessionId, created: !existed, message: existed ? '调试会话已经在了，去左侧栏「Aurabot · QQ」打开它' : '建好了一条调试会话，去左侧栏「Aurabot · QQ」打开它就能直接说话' }
   }
 
   /** 这个聊天要用的模型：面板里选的（或 DSH 默认），扩展模块可以按聊天改。 */
@@ -1139,6 +1158,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     leaveTopic: (gid) => groupEngaged.delete(String(gid)),
     chatOfSession,
     resetSessions,
+    ensureDebugSession,
     lastTextOf: (sessionId) => turnState.get(sessionKey(sessionId))?.lastText || '',
     prevTextOf: (sessionId) => turnState.get(sessionKey(sessionId))?.prevText || '',
     speakersOf: (sessionId) => turnState.get(sessionKey(sessionId))?.speakers || [],
