@@ -78,6 +78,11 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
 
   // ---------- 聊天流水（给空间日记、主动搭话、面板用） ----------
   function logChat(chatId, who, text, uid = '') {
+    // 调试模式：不写聊天流水，只进插件日志。流水是长期记忆的原料，写了就等于把调试对话记进记忆。
+    if (getConfig().debug) {
+      log.info(`[调试] ${who}${uid ? '（' + uid + '）' : ''} → ${chatId}：${String(text || '').slice(0, 300)}`)
+      return
+    }
     try {
       const d = new Date()
       const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -148,7 +153,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       log.debug('改会话标题失败：', error.message)
     }
     const m = map()
-    m.chats[chat.chatId] = { sessionId: sid, preset, level, createdAt: Date.now(), title: titleFor(chat) }
+    m.chats[chat.chatId] = { sessionId: sid, preset, level, createdAt: Date.now(), title: titleFor(chat), mode: getConfig().debug ? 'debug' : 'live' }
     saveMap(m)
     log.info(`为 ${chat.chatId} 新建了 DSH 会话 ${sid.slice(-8)}（${preset}）`)
     return sid
@@ -169,7 +174,9 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     const level = chat.kind === 'system' ? 'social' : levelFor(cfg, chat)
     const preset = presetFor(level)
     const entry = map().chats[chat.chatId]
-    let sid = entry && entry.preset === preset && entry.level === level ? entry.sessionId : ''
+    // 调试和正式用不同的会话：不然切回正式时，调试期间那些对话还在上下文里，等于被她"记住"了
+    const mode = cfg.debug ? 'debug' : 'live'
+    let sid = entry && entry.preset === preset && entry.level === level && (entry.mode || 'live') === mode ? entry.sessionId : ''
     let agent = null
     if (sid) {
       try {
@@ -317,6 +324,11 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     if (cap) {
       cap.push({ chatId, note, message })
       return { message_id: 'sim-' + cap.length }
+    }
+    // 调试模式什么都不发（连 force 的命令回复也不发），只在日志里能看到
+    if (cfg.debug) {
+      log.info(`调试（没真发）→ ${chatId}：${note}`)
+      return null
     }
     if (force) {}
     else if (!cfg.enabled) {

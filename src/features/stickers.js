@@ -101,6 +101,7 @@ export function createStickerStore({ dsh, getConfig, onebot, log }) {
   /** 收一张表情。seg 必须已经过 isStickerSegment 严格判定。 */
   async function collect(seg, from) {
     const cfg = getConfig().stickers
+    if (getConfig().debug) return { ok: false, reason: '调试模式，不收表情' } // 调试不往表情库里添东西
     if (!cfg.enabled || !cfg.collect) return { ok: false, reason: '偷表情关着' }
     const now = Date.now()
     while (recent.length && now - recent[0] > 3600_000) recent.shift()

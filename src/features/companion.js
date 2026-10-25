@@ -74,6 +74,7 @@ export function createMood({ getConfig, dsh }) {
   }
   /** 推一下心情（d 可正可负），记下原因。 */
   function nudge(d, reason) {
+    if (getConfig().debug) return // 调试模式不动心情：心情是持久状态，调试不该留下痕迹
     if (!getConfig().mood.enabled || !d) return
     const s = load()
     const before = current()
@@ -106,6 +107,7 @@ export function createMood({ getConfig, dsh }) {
      */
     async judge({ userText, reply, who = '对方', origin = 'user' }) {
       const cfg = getConfig().mood
+      if (getConfig().debug) return null // 调试模式不判心情（省一次模型调用，也不留下状态）
       if (!cfg.enabled || !cfg.judge || !dsh) return null
       const v = current()
       const scene = origin === 'speak-up' ? `这一轮是她自己想${who}了、主动去找${who}说话（不是被叫来干活）` : `这一轮是${who}在跟她说话`
