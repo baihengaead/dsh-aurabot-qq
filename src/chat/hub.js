@@ -594,6 +594,14 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
         return
       }
       if (!text) return release(chatId)
+      // 只让「这个聊天当前在用的那条会话」把回复发出去。
+      // 切过调试/正式、或者点过「重新开始」之后，旧会话可能还开在侧栏里 ——
+      // 你在那儿打字，她的回复也不该发到 QQ 上。
+      const cur = map().chats[chatId]
+      if (!cur || sessionKey(cur.sessionId) !== key) {
+        log.info(`${chatId} 的旧会话（${key.slice(0, 8)}…）这一轮不发：它已经不是当前在用的会话了`)
+        return release(chatId)
+      }
       // 发完再放开：发送期间来的消息也攒到下一段
       deliver(chatId, text, { wantVoice, userText: st.lastText || '' }).catch((error) => log.warn('发送出错：', error.message)).finally(() => release(chatId))
     }
