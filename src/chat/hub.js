@@ -225,10 +225,19 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     if (!cfg.ownerQQ) return { ok: false, message: '还没填主人 QQ' }
     const chat = { kind: 'private', chatId: `private:${cfg.ownerQQ}`, userId: String(cfg.ownerQQ), groupId: '', nickname: cfg.ownerName || '主人' }
     const before = map().chats[chat.chatId]
-    const existed = Boolean(before && (before.mode || 'live') === 'debug')
+    const prevId = before && (before.mode || 'live') === 'debug' ? before.sessionId : ''
     const r = await agentFor(chat)
-    if (!existed) log.info(`调试会话建好了：${r.sessionId.slice(-8)}（在左侧栏「Aurabot · QQ」里打开就能直接跟她说话）`)
-    return { ok: true, sessionId: r.sessionId, created: !existed, message: existed ? '调试会话已经在了，去左侧栏「Aurabot · QQ」打开它' : '建好了一条调试会话，去左侧栏「Aurabot · QQ」打开它就能直接说话' }
+    // 以「实际有没有换会话」为准：映射里记着但会话已经找不回来时，会上面会新建一条
+    const created = r.sessionId !== prevId
+    if (created) log.info(`调试会话建好了：${r.sessionId.slice(-8)}（在左侧栏「Aurabot · QQ」里打开就能直接跟她说话）`)
+    return {
+      ok: true,
+      sessionId: r.sessionId,
+      created,
+      message: created
+        ? '建好了一条调试会话：左侧栏「Aurabot · QQ」里刷新一下就能看到'
+        : '调试会话已经在了（左侧栏没看到就刷新一下 DSH 页面）。也可以直接用下面的「调试对话」说话，不用管侧栏',
+    }
   }
 
   /** 这个聊天要用的模型：面板里选的（或 DSH 默认），扩展模块可以按聊天改。 */
@@ -1043,8 +1052,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   }
 
   /** 后台任务（写日记、主动搭话的草稿）：在专用会话里跑一轮，拿到正文但不自动转发。 */
-  async function runSystemTurn(name, title, prompt, { timeoutMs = 180000 } = {}) {
-    const chat = { chatId: `system:${name}`, kind: 'system', title }
+  async function runSystemTurn(name, title, prompt, { timeoutMs = 180000 } = {}) {    const chat = { chatId: `system:${name}`, kind: 'system', title }
     const { agent, sessionId } = await agentFor(chat)
     const key = sessionKey(sessionId)
     const st = turnState.get(key) || { lastTurn: -1, text: '', senders: new Set() }
@@ -1061,8 +1069,46 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     return result
   }
 
-  /** 这一轮里说话的人是不是全是主人（群管等敏感工具用）。 */
-  /** 这一轮里主人说过话（群里常有别人插话，不要求每条都是主人）。 */
+  /**
+   * 面板里的调试对话：把一句话交给「主人私聊」那条链路，直接拿回她的正文。
+   * 不经过 QQ；调试模式下各个写入入口本来就是关的，所以也不会进记忆。
+   */
+  async function debugSay(text, { timeoutMs = 180000 } = {}) {
+    const cfg = getConfig()
+    if (!cfg.debug) return { ok: false, message: '没开调试模式' }
+    if (!cfg.ownerQQ) return { ok: false, message: '还没填主人 QQ' }
+    const say = String(text || '').trim().slice(0, 2000)
+    if (!say) return { ok: false, message: '说点什么吧' }
+    const chat = { kind: 'private', chatId: `private:${cfg.ownerQQ}`, userId: String(cfg.ownerQQ), groupId: '', nickname: cfg.ownerName || '主人' }
+    const { agent, sessionId } = await agentFor(chat)
+    const key = sessionKey(sessionId)
+    const st = turnState.get(key) || { lastTurn: -1, text: '', senders: new Set() }
+    turnState.set(key, st)
+    st.lastText = say
+    st.senders = new Set([String(cfg.ownerQQ)])
+    st.speakers = [String(cfg.ownerQQ)]
+    log.info(`[调试] 面板 → ${chat.chatId}：${say.slice(0, 300)}`)
+    let timer
+    const result = new Promise((resolve, reject) => {
+      st.system = { resolve, reject }
+      timer = setTimeout(() => {
+        st.system = null
+        reject(new Error(`等太久了（超过 ${Math.round(timeoutMs / 1000)} 秒）`))
+      }, timeoutMs)
+    }).finally(() => clearTimeout(timer))
+    try {
+      const admitted = await admit(agent, [{ type: 'text', text: say }])
+      await agent.followup({ id: randomUUID(), role: 'user', content: admitted, source: { kind: SOURCE_KIND } })
+      const reply = await result
+      log.info(`[调试] bot → 面板：${String(reply || '（她没说话）').slice(0, 300)}`)
+      return { ok: true, text: reply, sessionId }
+    } catch (error) {
+      st.system = null
+      return { ok: false, message: error.message }
+    }
+  }
+
+  /** 这一轮里说话的人是不是全是主人（群管等敏感工具用）。 */  /** 这一轮里主人说过话（群里常有别人插话，不要求每条都是主人）。 */
   function turnHasOwner(sessionId) {
     const st = turnState.get(sessionKey(sessionId))
     return Boolean(st && [...st.senders].some((u) => isOwner(getConfig(), u)))
@@ -1159,6 +1205,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     chatOfSession,
     resetSessions,
     ensureDebugSession,
+    debugSay,
     lastTextOf: (sessionId) => turnState.get(sessionKey(sessionId))?.lastText || '',
     prevTextOf: (sessionId) => turnState.get(sessionKey(sessionId))?.prevText || '',
     speakersOf: (sessionId) => turnState.get(sessionKey(sessionId))?.speakers || [],

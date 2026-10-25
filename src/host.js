@@ -380,6 +380,16 @@ export function apply(ctx) {
     }
   })
 
+  // 面板里的调试对话：不经过 QQ，也不进记忆
+  route('/debug/say', async (req) => {
+    const b = await readBody(req)
+    try {
+      return await hub.debugSay(String(b.text || ''))
+    } catch (error) {
+      return { ok: false, message: error.message }
+    }
+  })
+
   route('/logs', async (req) => {
     const q = query(req)
     return { ok: true, entries: logger.recent(Number(q.limit) || 300, { level: q.level || '', area: q.area || '' }) }
