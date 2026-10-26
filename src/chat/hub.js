@@ -194,7 +194,9 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     // 每种模式各记一条（entry.sessions），切回来时接上原来那条；档位变了就整体作废。
     const mode = cfg.debug ? 'debug' : 'live'
     const sameLevel = Boolean(entry && entry.preset === preset && entry.level === level)
-    const remembered = sameLevel ? ((entry.sessions && entry.sessions[mode]) || (entry.mode === mode ? entry.sessionId : '')) : ''
+    // 老数据没有 mode / sessions 字段（调试功能之前开的会话）—— 一律当正式会话，不能当成"模式不匹配"
+    const prevMode = (entry && entry.mode) || 'live'
+    const remembered = sameLevel ? ((entry.sessions && entry.sessions[mode]) || (prevMode === mode ? entry.sessionId : '')) : ''
     let sid = remembered || ''
     let agent = null
     if (sid) {
