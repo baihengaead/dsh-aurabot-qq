@@ -15,13 +15,30 @@ function isPrivateIp(ip) {
   return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224
 }
 
+// ---------- SSRF 防护强度 ----------
+// 面板「安全防护」页里选，host 启动时注入；这里不直接读配置，保持纯工具。
+let modeGetter = () => 'strict'
+export function setSsrpMode (fn) { if (typeof fn === 'function') modeGetter = fn }
+export const currentSsrpMode = () => (modeGetter() === 'loose' ? 'loose' : 'strict')
+
+/**
+ * 这组解析结果算不算「内网目标」。
+ * strict：只要有一个内网地址就拒绝（默认；部署在服务器上、不信任群友时用）。
+ * loose：全部解析结果都是内网才拒绝（本机 DNS 会给公网域名同时塞一条 IPv6 ULA 时用）。
+ */
+export function ssrfBlocked (ips, mode = currentSsrpMode()) {
+  const list = (Array.isArray(ips) ? ips : []).filter((x) => typeof x === 'string' && x)
+  if (!list.length) return true
+  return mode === 'loose' ? list.every(isPrivateIp) : list.some(isPrivateIp)
+}
+
 export async function assertPublicUrl(url) {
   const u = new URL(url)
   if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('只允许 http / https')
   const host = u.hostname.replace(/^\[|\]$/g, '')
   if (host === 'localhost') throw new Error('不允许访问本机地址')
   const ips = isIP(host) ? [host] : (await lookup(host, { all: true })).map((x) => x.address)
-  if (!ips.length || ips.some(isPrivateIp)) throw new Error('不允许访问内网地址')
+  if (ssrfBlocked(ips)) throw new Error('不允许访问内网地址')
 }
 
 /**

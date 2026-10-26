@@ -160,7 +160,14 @@ export function createStickerStore({ dsh, getConfig, onebot, log }) {
     const md5 = createHash('md5').update(buf).digest('hex')
     const lib = loadLibrary()
     const exist = lib.items.find((i) => i.md5 === md5)
-    if (exist) return { ok: true, item: exist, existed: true }
+    if (exist) {
+      // 已经在库里了（很常见：她刚收到这张图时后台自动收过一次）。这次给的名字/标签别白丢。
+      let touched = false
+      if (name && !exist.name) { exist.name = String(name).slice(0, 12); touched = true }
+      if (Array.isArray(tags) && tags.length && !(exist.tags || []).length) { exist.tags = tags; touched = true }
+      if (touched) saveLibrary(lib)
+      return { ok: true, item: exist, existed: true, touched }
+    }
     const mime = mimeOf(buf)
     if (!mime.startsWith('image/')) return { ok: false, reason: '不是图片' }
     mkdirSync(dir(), { recursive: true })

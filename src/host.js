@@ -22,6 +22,7 @@ import { createHub, WORKSPACE_DIR } from './chat/hub.js'
 import { createLocal, fileOf, toImageBuffer } from './local/local.js'
 import { createGroupRoles } from './chat/group-roles.js'
 import { defaultModel, askModel, modelReasoning, clearReasoningCache } from './core/llm.js'
+import { setSsrpMode } from './core/net.js'
 import { mimeOf } from './chat/inbound.js'
 import { dataDir, ensureDir } from './core/store.js'
 import { createUpdateChecker, changelogSection } from './core/update.js'
@@ -48,6 +49,8 @@ export function apply(ctx) {
   let mods = null
   let bridge = null
   const getConfig = () => cfg
+  // 面板「安全防护」页选的 SSRF 强度，注入给 core/net（那边是纯工具，不读配置）
+  setSsrpMode(() => (getConfig().security && getConfig().security.ssrfMode === 'loose' ? 'loose' : 'strict'))
   const secrets = () => { for (const k of ['webuiPassword', 'httpToken', 'wsToken']) registerSecret(cfg.snowluma[k]); registerSecret(cfg.imageGen.apiKey); registerSecret(cfg.bridge.token) }
   const setConfig = (next) => {
     const before = cfg

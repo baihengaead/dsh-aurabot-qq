@@ -77,7 +77,13 @@ export default {
         execute: async ({ source, name, tags }) => {
           const buf = await fetchImage(String(source), { maxBytes: 5 * 1024 * 1024 })
           const r = await store.addFromBuffer(buf, { name: name || '', tags: Array.isArray(tags) ? tags.slice(0, 3) : [], from: 'tool' })
-          return r.ok ? { ok: true, message: r.existed ? '库里已经有这张了' : `收好了「${r.item.name || '未命名'}」` } : { ok: false, message: r.reason }
+          if (!r.ok) return { ok: false, message: r.reason }
+          // 这张可能在收到它的那一刻就被后台自动收进库了：说清楚，别让她以为失败了
+          if (r.existed) {
+            const label = r.item.name ? `「${r.item.name}」` : '（还没起名）'
+            return { ok: true, message: `这张之前就收过了，库里叫${label}${r.touched ? '，这次给的名字/标签已经补上' : ''}` }
+          }
+          return { ok: true, message: `收好了「${r.item.name || '未命名'}」` }
         },
       }))
       return tools

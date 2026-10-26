@@ -8,6 +8,11 @@ export const DEFAULTS = {
   enabled: false, // 总开关：关着一句都不发
   dryRun: true, // 试运行：只记日志不真发（记忆照写）
   debug: false, // 调试：不真发 + 什么都不写进记忆/流水，只在日志里看（和试运行互斥）
+  security: {
+    // SSRF 防护强度：strict = 解析结果里只要有一个内网地址就拒绝（服务器部署用）；
+    // loose = 全部解析结果都是内网才拒绝（本机 DNS 会同时返回公网地址和 IPv6 ULA 时用）
+    ssrfMode: 'strict',
+  },
   setupDone: false, // 首次使用向导走完了没有
   botQQ: '', // 机器人 QQ 号（向导里填）
   ownerQQ: '', // 主人 QQ 号（向导里填）
@@ -182,6 +187,9 @@ export function normalize(raw) {
   // 调试比试运行更严：它本身就包含「不真发」，所以内部一律当成 dryRun（下面所有 dryRun 判断都自动生效）。
   // 面板上两个开关互斥，「试运行」显示的是 dryRun && !debug。
   if (c.debug) c.dryRun = true
+  // SSRF 防护：只认 strict / loose 两个值，其它一律回落到 strict
+  if (!c.security || typeof c.security !== 'object') c.security = { ssrfMode: 'strict' }
+  c.security.ssrfMode = c.security.ssrfMode === 'loose' ? 'loose' : 'strict'
   c.botQQ = qq(c.botQQ)
   c.ownerQQ = qq(c.ownerQQ)
   c.setupDone = bool(c.setupDone, false)
