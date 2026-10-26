@@ -398,6 +398,35 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
     return true
   }
 
+  // 主人这句话里提到「群」相关，才临时把今天的群聊流水当背景（不常驻，也不当成主人说的话）
+  const GROUP_TALK = /(群|群聊|群里|他们|大家|那些人在聊)/
+
+  /**
+   * 主人在私聊里问起群里的事：把「今天」的群聊流水当参考放进来。
+   * 只在主人私聊 + 这一句确实提到群时才给；块里明确写清「这不是主人对你说的」。
+   */
+  function groupBackdrop (chat, sessionId) {
+    if (!chat || chat.kind !== 'private') return ''
+    const all = getConfig()
+    if (!all.ownerQQ || String(chat.userId) !== String(all.ownerQQ)) return ''
+    const q = hub?.lastTextOf?.(sessionId) || ''
+    if (!GROUP_TALK.test(q)) return ''
+    let rows = []
+    try {
+      rows = (hub?.chatLogOf?.(dayKey()) || []).filter((l) => l && String(l.chatId).startsWith('group:') && String(l.text || '').trim())
+    } catch (error) {
+      return ''
+    }
+    if (!rows.length) return ''
+    const body = rows.slice(-24).map((l) => {
+      const who = l.who === 'bot' ? '我' : (l.who || '有人')
+      return `${who}：${String(l.text).replace(/\s+/g, ' ').trim().slice(0, 100)}`
+    }).join('\n')
+    return '（下面是**今天群里**发生过的对话，只在回答主人关于群里的问题时参考。'
+      + '**这不是主人对你说的话**，别把它当成主人发来的消息，也别主动把群里的私事往外说；主人问到了再自然用上。）\n'
+      + '【今天的群聊记录（节选，越靠后越新）】\n' + body + '\n【群聊记录结束】'
+  }
+
   /** 给系统提示词上下文用：人物小档案 + 相处经验（常驻）+ 按这一轮对方说的话检索到的记忆。 */
   function contextFor(chat, sessionId) {
     const cfg = getConfig().memory
@@ -425,6 +454,9 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
       const hits = recall(q, { about, where: chat.chatId || '', context: q.length < 12 ? hub?.prevTextOf?.(sessionId) || '' : '' }).filter((h) => !shown.has(h.it.id))
       if (hits.length) parts.push('（你记得这些事，方括号里是什么时候的事，聊到相关的就自然用上，别把老事当新事说，也别说「根据记忆」：' + hits.map((h) => memoryLine(h.it)).join('；') + '）')
     }
+    // 主人在私聊里问起群里的事：临时补一段今天的群聊记录（明确标成背景，不是主人说的话）
+    const backdrop = groupBackdrop(chat, sessionId)
+    if (backdrop) parts.push(backdrop)
     return parts.join('\n')
   }
 

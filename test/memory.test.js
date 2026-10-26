@@ -60,6 +60,37 @@ test('默认一天整理两次；老配置的单个时间自动变成两个', ()
   assert.deepEqual(normalize({ memory: { consolidateAt: '03:30' } }).memory.consolidateTimes, ['03:30', '15:30'])
 })
 
+test('主人私聊里问起群里的事：才补今天的群聊记录，并标明不是主人说的话', () => {
+  const myCfg = normalize({ model: { provider: 'p', model: 'm' }, ownerQQ: '10000001', ownerName: '主人' })
+  const m2 = createMemoryStore({ dsh, getConfig: () => myCfg, hub, log: { info() {}, warn() {}, debug() {} } })
+  const today = day(new Date())
+  logs.set(today, [
+    line('（私聊里的悄悄话）'),
+    { chatId: 'group:1129624985', who: '阿花', uid: '30000003', text: '今天去看了海' },
+    { chatId: 'group:1129624985', who: 'bot', text: '我也想去' },
+  ])
+  const priv = (uid) => ({ kind: 'private', userId: uid, chatId: `private:${uid}` })
+
+  // 提到了群 → 带上，而且写清是背景
+  hubState.text = '群里刚才聊什么了'
+  const hit = m2.contextFor(priv('10000001'), 'sid')
+  assert.match(hit, /今天的群聊记录/)
+  assert.match(hit, /这不是主人对你说的话/)
+  assert.match(hit, /阿花：今天去看了海/)
+  assert.match(hit, /我：我也想去/)
+
+  // 没提群 → 一个字都不加
+  hubState.text = '今天晚饭吃什么'
+  assert.doesNotMatch(m2.contextFor(priv('10000001'), 'sid'), /群聊记录/)
+
+  // 不是主人 → 不加
+  hubState.text = '群里聊什么了'
+  assert.doesNotMatch(m2.contextFor(priv('99999999'), 'sid'), /群聊记录/)
+
+  // 群里说话 → 不加（这是群聊本身，不需要背景）
+  assert.doesNotMatch(m2.contextFor({ kind: 'group', groupId: '1129624985', chatId: 'group:1129624985' }, 'sid'), /群聊记录/)
+})
+
 test('整理：提炼记忆、相处经验和说话方式；同一天再整理只处理新增的聊天', async () => {
   const today = day(new Date())
   logs.set(today, [line('我超爱吃辣'), line('hhh'), line('今天好累'), line('嗯嗯', 'bot')])
