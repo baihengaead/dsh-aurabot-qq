@@ -1,7 +1,29 @@
 // 内置模块：生图。她能画图发到聊天里（OpenAI 兼容的生图服务，或「本地接口」里接的 SD WebUI / ComfyUI）。
 
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { createImageGen } from '../../features/imagegen.js'
 import { defineTool, str } from '../../tools/tools.js'
+import { dataDir } from '../../core/store.js'
+import { mimeOf } from '../../chat/inbound.js'
+
+/** 把画好的图存一份，返回路径（她自己能去读，主人也能回看画过什么）。 */
+function saveImage (buf, prompt) {
+  try {
+    const dir = dataDir('imagegen')
+    mkdirSync(dir, { recursive: true })
+    const d = new Date()
+    const p = (n) => String(n).padStart(2, '0')
+    const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+    const slug = String(prompt || '图').replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 20)
+    const ext = mimeOf(buf) === 'image/jpeg' ? 'jpg' : 'png'
+    const file = join(dir, `${stamp}-${slug}.${ext}`)
+    writeFileSync(file, buf)
+    return file
+  } catch (error) {
+    return ''
+  }
+}
 
 export default {
   id: 'imagegen',
@@ -23,10 +45,13 @@ export default {
         if (api.config().imageGen.ownerOnly && !hub.turnSendersAllOwner(sessionId)) return { ok: false, message: '画图只给主人画哦' }
         const buf = await gen.generate(String(prompt || ''))
         await hub.sendSegments(chat.chatId, [{ type: 'image', data: { file: 'base64://' + buf.toString('base64') } }], `[生图] ${String(prompt).slice(0, 30)}`)
+        const saved = saveImage(buf, String(prompt || ''))
+        if (saved) api.log.debug(`生图已存盘：${saved}`)
         // 自己回头看一眼：这样她才知道自己画成了什么，用户问「画得怎么样」时有话说
         const seen = await gen.look(buf, String(prompt || ''))
         memory.addEvent?.({ text: `画了一张图：${String(prompt).slice(0, 40)}`, about: chat.kind === 'private' ? chat.userId : '', tags: ['画画'], importance: 0.4 })
-        return { ok: true, message: seen ? `画好发出去了。你自己看到的画面：${seen}` : '画好发出去了' }
+        const where = saved ? `（存在 ${saved}，你想看可以自己读它）` : ''
+        return { ok: true, message: seen ? `画好发出去了${where}。你自己看到的画面：${seen}` : `画好发出去了${where}` }
       },
     }) : []))
     return gen
