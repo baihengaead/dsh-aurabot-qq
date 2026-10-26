@@ -3,7 +3,7 @@
 
 import { readFileSync, existsSync } from 'node:fs'
 import { createStickerStore, stickerPath } from '../../features/stickers.js'
-import { defineTool, str } from '../../tools/tools.js'
+import { defineTool, str, int } from '../../tools/tools.js'
 import { fetchImage } from '../../core/net.js'
 
 export default {
@@ -68,6 +68,32 @@ export default {
           },
         }),
       ]
+      // 「她挑」模式：聊天里刚收到的表情，喜欢就凭编号收下（各档位都能用）
+      tools.push(defineTool({
+        name: 'qq_collect_sticker',
+        description: '把刚才聊天里出现的表情收进自己的表情库（喜欢才收，不喜欢就别调）。index 从 1 开始；name 是你给它起的名字。',
+        properties: {
+          index: int('第几张表情（从 1 开始，默认 1）'),
+          name: str('给它起的名字（≤12 字）'),
+          tags: { type: 'array', items: { type: 'string' }, description: '标签，如 开心/委屈' },
+        },
+        required: [],
+        execute: async ({ index, name, tags }) => {
+          const seg = hub.stickerOf(chat.chatId, index || 1)
+          if (!seg) return { ok: false, message: '这张表情已经拿不到了（太久了，或者这一轮里没有这张）' }
+          const r = await store.saveFromSegment(seg, {
+            name: String(name || '').trim().slice(0, 12),
+            tags: Array.isArray(tags) ? tags.slice(0, 3) : [],
+            from: chat.chatId,
+          })
+          if (!r.ok) return { ok: false, message: r.reason }
+          if (r.existed) {
+            const label = r.item.name ? `「${r.item.name}」` : '（还没起名）'
+            return { ok: true, message: `这张已经在库里了，叫${label}${r.touched ? '，名字已经补上' : ''}` }
+          }
+          return { ok: true, message: `收好了，叫「${r.item.name || '未命名'}」` }
+        },
+      }))
       // 主人私聊（完整权限）才能往库里加图
       if (level === 'full') tools.push(defineTool({
         name: 'qq_add_sticker',

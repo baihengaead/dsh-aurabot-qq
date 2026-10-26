@@ -70,7 +70,8 @@ export const DEFAULTS = {
   stickers: {
     enabled: true,
     autoChance: 0.35, // 文字回复自动配一张表情的概率
-    collect: true, // 偷表情
+    collect: true, // 偷表情总开关
+    collectMode: 'ask', // ask = 她挑（喜欢才收）；auto = 全都偷（看到就收）
     fromGroups: true,
     fromPrivate: true,
     maxPerHour: 20,
@@ -285,6 +286,8 @@ export function normalize(raw) {
   c.imageGen.enabled = bool(c.imageGen.enabled, false)
   c.imageGen.ownerOnly = bool(c.imageGen.ownerOnly, true)
   c.imageGen.seeOwn = bool(c.imageGen.seeOwn, true)
+  // 偷表情方式：ask = 她挑，auto = 全都偷
+  c.stickers.collectMode = c.stickers.collectMode === 'auto' ? 'auto' : 'ask'
   if (!/^\d{3,4}x\d{3,4}$/.test(String(c.imageGen.size))) c.imageGen.size = '1024x1024'
   // provider：custom = 自己填接口（GET/POST + 自定义参数），其它一律按 OpenAI 兼容
   c.imageGen.provider = c.imageGen.provider === 'custom' ? 'custom' : 'openai'

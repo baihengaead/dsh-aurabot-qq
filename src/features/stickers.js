@@ -160,6 +160,27 @@ export function createStickerStore({ dsh, getConfig, onebot, log }) {
     return { ok: true, item }
   }
 
+  /**
+   * 「她挑」模式：把聊天里收到的那个表情直接收下来。
+   * 名字是她自己起的，所以不走后台看图起名；也不占「每小时最多收」的额度。
+   */
+  async function saveFromSegment(seg, { name = '', tags = [], from = 'picked' } = {}) {
+    if (getConfig().debug) return { ok: false, reason: '调试模式，不收表情' }
+    const cfg = getConfig().stickers
+    if (!cfg.enabled) return { ok: false, reason: '表情包模块关着' }
+    let buf
+    try {
+      buf = await segmentBytes(seg, onebot, { maxBytes: 1.5 * 1024 * 1024 })
+    } catch (error) {
+      return { ok: false, reason: '拿不到这张图：' + error.message }
+    }
+    const { width, height } = imageSize(buf)
+    if (!stickerSizeOk({ width, height, bytes: buf.length }, { maxSide: cfg.maxSide })) {
+      return { ok: false, reason: `尺寸不像表情（${width}x${height}，${Math.round(buf.length / 1024)}KB）` }
+    }
+    return await addFromBuffer(buf, { name, tags, from })
+  }
+
   /** 手动添加（工具 / 面板上传）。 */
   async function addFromBuffer(buf, { name = '', tags = [], from = 'manual', toQQ = true } = {}) {
     const md5 = createHash('md5').update(buf).digest('hex')
@@ -248,5 +269,5 @@ export function createStickerStore({ dsh, getConfig, onebot, log }) {
     return { type: 'image', data: { file: 'base64://' + readFileSync(p).toString('base64'), sub_type: 1, summary: `[${item.name || '表情'}]` } }
   }
 
-  return { collect, addFromBuffer, remove, rename, segmentFor, markUsed, trim, library: loadLibrary, match: (q) => matchSticker(loadLibrary().items, q), pickForReply: (t) => pickForReply(loadLibrary().items, t) }
+  return { collect, addFromBuffer, saveFromSegment, remove, rename, segmentFor, markUsed, trim, library: loadLibrary, match: (q) => matchSticker(loadLibrary().items, q), pickForReply: (t) => pickForReply(loadLibrary().items, t) }
 }

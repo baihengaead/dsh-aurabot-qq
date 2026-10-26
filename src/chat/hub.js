@@ -59,6 +59,24 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   const groupInterjects = new Map() // groupId → [t]  她主动开口（插话、接话）的时间
   const groupSaid = new Map() // groupId → [t]  她每次在群里说话的时间（刹车用）
   const groupFedAt = new Map() // groupId → 上次把群消息交给她的时间
+  // 「她挑」模式：这一轮收到的表情先按会话记着，她想收时凭编号来取（10 分钟有效）
+  const stickerStash = new Map() // chatId → { at, segs: [seg] }
+
+  /** 记下这一轮收到的表情，返回张数。 */
+  function rememberStickers (chatId, segs) {
+    const list = (segs || []).slice(0, 4)
+    if (!list.length) return 0
+    stickerStash.set(chatId, { at: Date.now(), segs: list })
+    return list.length
+  }
+
+  /** 取第 index 张（从 1 开始）。过期或没有就返回 null。 */
+  function stickerOf (chatId, index) {
+    const s = stickerStash.get(chatId)
+    if (!s || Date.now() - s.at > 10 * 60_000) return null
+    const i = Number(index) - 1
+    return Number.isInteger(i) && i >= 0 && i < s.segs.length ? s.segs[i] : null
+  }
   const groupRefs = new Map() // groupId → { 编号: QQ 消息 ID }  上一段提示词里的编号，引用回复用
   const groupEngaged = new Map() // groupId → 加入话题到什么时候（毫秒）
   const ENGAGE_MS = 3 * 60_000
@@ -741,10 +759,18 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     }
 
     const allowed = checkAllowed(cfg, msg)
-    // 偷表情：只从白名单里的会话偷
+    // 偷表情：只从白名单里的会话偷。
+    //   auto = 全都偷（看到就收）；ask = 她挑（先记着，她喜欢再凭编号来收）
+    let stickerPick = 0
     if (allowed.allowed && msg.stickers.length && cfg.stickers.collect) {
       const okSrc = msg.kind === 'group' ? cfg.stickers.fromGroups : cfg.stickers.fromPrivate
-      if (okSrc) for (const s of msg.stickers) stickers.collect(s, msg.chatId).then((r) => { if (!r.ok) log.debug('没收这张表情：', r.reason) }).catch(() => {})
+      if (okSrc) {
+        if ((cfg.stickers.collectMode || 'ask') === 'auto') {
+          for (const s of msg.stickers) stickers.collect(s, msg.chatId).then((r) => { if (!r.ok) log.debug('没收这张表情：', r.reason) }).catch(() => {})
+        } else {
+          stickerPick = rememberStickers(msg.chatId, msg.stickers)
+        }
+      }
     }
     if (!allowed.allowed) {
       log.debug(`忽略 ${msg.chatId}（${allowed.reason}）`)
@@ -859,6 +885,13 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       }
     }
     logChat(msg.chatId, msg.nickname, text, msg.userId)
+    // 「她挑」模式：把这一轮收到的表情告诉她，收不收由她定
+    if (stickerPick) {
+      content.push({
+        type: 'text',
+        text: `（这一轮还有 ${stickerPick} 个表情。你要是喜欢，可以调 qq_collect_sticker 收进自己的表情库，编号 1${stickerPick > 1 ? '~' + stickerPick : ''}，名字你自己起；不喜欢就别管。）`,
+      })
+    }
     lastChatAt = now
     if (msg.kind === 'private' && msg.userId === cfg.ownerQQ) lastOwnerChatAt = now
     onActivity?.({ kind: 'in', chatId: msg.chatId, userId: msg.userId, nickname: msg.nickname, text, direct: msg.kind === 'private' || msg.mentioned || mode === 'must', owner: isOwner(cfg, msg.userId) })
@@ -1250,6 +1283,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     onPoke,
     onSessionEvent,
     deliver,
+    stickerOf,
     sendText,
     sendVoice,
     sendVoiceFile,
