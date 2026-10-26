@@ -5,7 +5,7 @@
 
 import { fetchImage } from '../core/net.js'
 import { mimeOf } from '../chat/inbound.js'
-import { askModel } from '../core/llm.js'
+import { askModel, canSeeImages } from '../core/llm.js'
 
 /** 把模板里的 {占位符} 替换掉；不认识的占位符原样留着。 */
 function fill (tpl, vars) {
@@ -174,6 +174,8 @@ export function createImageGen({ getConfig, log, local, dsh }) {
   async function look (buf, prompt) {
     const c = getConfig().imageGen
     if (!dsh || c.seeOwn === false) return ''
+    // 模型明确看不了图就别浪费一次调用
+    if ((await canSeeImages(dsh, getConfig())) === false) return ''
     try {
       const text = await askModel(dsh, {
         cfg: getConfig(),
