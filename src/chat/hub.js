@@ -81,6 +81,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   const groupEngaged = new Map() // groupId → 加入话题到什么时候（毫秒）
   const ENGAGE_MS = 3 * 60_000
   const groupNames = new Map()
+  const recentMedia = new Map() // chatId → [{ seg, userId, at, sticker }] 最近发来的图片和表情
   const sentIds = new Set()
   const stats = { received: 0, sent: 0, voice: 0, stickers: 0, errors: 0, day: new Date().toDateString() }
   let selfId = ''
@@ -776,6 +777,12 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       log.debug(`忽略 ${msg.chatId}（${allowed.reason}）`)
       return
     }
+    // 最近发来的图片 / 表情记几张（「把刚才那张存下来」时用）
+    if (msg.stickers.length || msg.images.length) {
+      const list = (recentMedia.get(msg.chatId) || []).filter((x) => now - x.at < 30 * 60_000)
+      for (const seg of [...msg.stickers, ...msg.images]) list.push({ seg, userId: msg.userId, at: now, sticker: msg.stickers.includes(seg) })
+      recentMedia.set(msg.chatId, list.slice(-6))
+    }
     // 主人命令（/silent /active …）：总开关关着也处理，回复直接发
     if (onCommand && isOwner(cfg, msg.userId) && /^\s*[/／]/.test(msg.text)) {
       try {
@@ -1278,6 +1285,8 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   }
 
   return {
+    /** 这个聊天最近发来的图片 / 表情（新的在后面），可选只要某人发的 */
+    recentMedia: (chatId, userId) => (recentMedia.get(String(chatId)) || []).filter((x) => !userId || x.userId === String(userId)),
     capture,
     simulateTurn,
     onMessage,

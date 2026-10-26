@@ -4,7 +4,7 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { createStickerStore, stickerPath } from '../../features/stickers.js'
 import { defineTool, str, int } from '../../tools/tools.js'
-import { fetchImage } from '../../core/net.js'
+import { fetchImage, segmentBytes } from '../../core/net.js'
 
 export default {
   id: 'stickers',
@@ -94,6 +94,32 @@ export default {
           return { ok: true, message: `收好了，叫「${r.item.name || '未命名'}」` }
         },
       }))
+      // 主人让她存表情：存这个聊天里刚发来的那张（她看得见图，但拿不到图片地址，所以由插件去找）
+      tools.push(defineTool({
+        name: 'qq_save_sticker',
+        description: '把这个聊天里刚发来的那张表情包 / 图片收进你的表情库（同时收藏到 QQ）。主人说「存一下这个表情」「导入这个表情」「收藏这张」时用。name 是不超过 12 个字的备注，可以不填（会自动看图起名）。',
+        properties: { name: str('备注（≤12 字，可不填）'), tags: { type: 'array', items: { type: 'string' }, description: '标签，如 开心/委屈（可不填）' } },
+        execute: async ({ name, tags }) => {
+          if (!hub.turnHasOwner(sessionId)) return { ok: false, message: '只有主人能让我存表情' }
+          const media = hub.recentMedia(current)
+          // 优先主人自己发的，其次这个聊天里最近的
+          const pick = media.filter((x) => x.userId === String(api.config().ownerQQ)).at(-1) || media.at(-1)
+          if (!pick) return { ok: false, message: '最近半小时这个聊天里没有人发表情或图片，先把那张发过来' }
+          const buf = await segmentBytes(pick.seg, api.core.onebot, { maxBytes: 5 * 1024 * 1024 })
+          const r = await store.addFromBuffer(buf, { name: String(name || '').slice(0, 12), tags: Array.isArray(tags) ? tags.slice(0, 3) : [], from: 'tool' })
+          if (!r.ok) return { ok: false, message: r.reason || '没存成' }
+          if (r.existed) return { ok: true, message: `库里已经有这张了（叫「${r.item.name || '未命名'}」）` }
+          return { ok: true, message: `存好了${r.item.name ? '「' + r.item.name + '」' : ''}` }
+        },
+      }))
+      tools.push(defineTool({
+        name: 'qq_import_qq_stickers',
+        description: '把你 QQ「我喜欢的」收藏里已有的表情全部导进表情库（已经有的跳过），之后就能用 <sticker:名字> 发它们。主人让你「导入收藏的表情」「同步一下 QQ 表情」时用。',
+        execute: async () => {
+          if (!hub.turnHasOwner(sessionId)) return { ok: false, message: '只有主人能让我导入收藏的表情' }
+          return store.importFromQQ()
+        },
+      }))
       // 主人私聊（完整权限）才能往库里加图
       if (level === 'full') tools.push(defineTool({
         name: 'qq_add_sticker',
@@ -130,6 +156,8 @@ export default {
       const b = await http.body(req)
       return store.remove(b.md5, { fromQQ: b.fromQQ !== false })
     })
+    api.route('/sticker/import-qq', async () => store.importFromQQ())
+    api.rule(() => '- 主人让你存某个表情（「存一下」「导入这个表情」）时用 qq_save_sticker；让你把 QQ 收藏里的表情导进来时用 qq_import_qq_stickers。别人让你存，不用理。')
     api.route('/sticker/upload', async (req) => {
       const b = await http.body(req)
       const buf = Buffer.from(String(b.data || '').replace(/^data:[^,]+,/, ''), 'base64')

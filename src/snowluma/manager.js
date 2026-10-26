@@ -97,6 +97,18 @@ export function pickBotProcess(list, botUin, { exclude = [] } = {}) {
   return { proc: null, reason: '没找到登录机器人号的 QQ 进程' }
 }
 
+/** SnowLuma 控制台密码的强度要求（和它自己的规则一致）。返回没满足的那几条，空数组 = 合格。 */
+export function passwordProblems(pw) {
+  const p = String(pw || '')
+  return [
+    [p.length >= 10, '至少 10 位'],
+    [/[a-z]/.test(p), '要有小写字母'],
+    [/[A-Z]/.test(p), '要有大写字母'],
+    [/[^A-Za-z0-9\s]/.test(p), '要有符号（比如 ! @ #）'],
+    [!/\s/.test(p), '不能有空格'],
+  ].filter(([ok]) => !ok).map(([, why]) => why)
+}
+
 /** 生成满足 SnowLuma 规则的强密码：≥10 位、有大小写和符号、无空格。 */
 export function generatePassword() {
   const b = randomBytes(18).toString('base64url').replace(/[-_]/g, '')
@@ -110,6 +122,7 @@ export function createSnowLumaManager({ getConfig, log, savePassword }) {
   let tokenAt = 0
   let tokenPw = ''
   let lastAttach = { at: 0, ok: false, message: '' }
+  let lowIntegrity = false
   // 认不出号、靠事后核对才注入的进程：{ pid, at }；核对发现不是机器人号的进程 pid 记进 rejected，以后不再碰
   let pendingVerify = null
   const rejected = new Set()
@@ -197,6 +210,9 @@ export function createSnowLumaManager({ getConfig, log, savePassword }) {
       // 首次启动 SnowLuma 会在控制台打印初始密码：凭据相关的行一律不进日志
       for (const line of String(buf).split(/\r?\n/)) {
         if (!line.trim() || /密码|password|credential|凭据|token/i.test(line)) continue
+        // 解压在带低完整性标签的目录里时 SnowLuma 是 Low 完整性，看不到 QQ 进程
+        if (/integrity:.*process=Low/i.test(line)) lowIntegrity = true
+        else if (/integrity:/i.test(line)) lowIntegrity = false
         if (line.includes('[Event]') || line.includes('[Bridge.Action]')) continue // 别人的聊天内容和接口调用明细不进日志
         log.debug(line.slice(0, 400))
       }
@@ -339,8 +355,11 @@ export function createSnowLumaManager({ getConfig, log, savePassword }) {
     return path.toLowerCase().startsWith(inst.dir.toLowerCase()) ? pid : 0
   }
 
-  /** 重置为自动密码：停掉 SnowLuma → 删掉旧凭据 → 生成新密码 → 重新启动。用于之前手动设过密码、插件不知道的情况。 */
-  async function resetPassword() {
+  /**
+   * 重置密码：停掉 SnowLuma → 删掉旧凭据 → 用新密码重新启动。用于之前手动设过密码、插件不知道的情况。
+   * pw 不给就生成一个（自动管理）；给了就用它（主人自己定的）。
+   */
+  async function resetPassword(pw = '') {
     const inst = detectInstall(cfg().dir)
     if (!inst.installed) return { ok: false, message: inst.reason }
     if (child) {
@@ -352,10 +371,33 @@ export function createSnowLumaManager({ getConfig, log, savePassword }) {
     }
     for (let i = 0; i < 20 && (await running()); i++) await new Promise((r) => setTimeout(r, 500))
     try { unlinkSync(join(inst.dir, 'config', 'webui.json')) } catch (error) {}
-    savePassword?.(generatePassword())
+    savePassword?.(pw || generatePassword(), !pw)
     token = ''
     const r = await start()
-    return r.ok ? { ok: true, message: '控制台密码已改成自动管理，SnowLuma 已重新启动' } : r
+    return r.ok ? { ok: true, message: pw ? '控制台密码改好了，SnowLuma 已重新启动' : '控制台密码已改成自动管理，SnowLuma 已重新启动' } : r
+  }
+
+  /**
+   * 主人自己设控制台密码。SnowLuma 在跑、插件知道旧密码：直接调它的改密码接口，不用重启；
+   * 否则（旧密码对不上、还没装好）走重置：删掉旧凭据，用这个密码重新启动。
+   */
+  async function setPassword(pw) {
+    const bad = passwordProblems(pw)
+    if (bad.length) return { ok: false, message: '密码不合格：' + bad.join('、') }
+    const old = cfg().webuiPassword
+    if (old === pw) return { ok: true, message: '密码没变' }
+    if (old && (await running())) {
+      try {
+        await api('/api/auth/change-password', { method: 'POST', body: { oldPassword: old, newPassword: pw } })
+        savePassword?.(pw, false)
+        token = ''
+        log.info('SnowLuma 控制台密码改好了（主人自己设的）')
+        return { ok: true, message: '控制台密码改好了' }
+      } catch (error) {
+        log.warn('直接改密码没成功，改用重置：', error.message)
+      }
+    }
+    return resetPassword(pw)
   }
 
   /** 插件能不能登录控制台（密码对不对）。 */
@@ -382,9 +424,15 @@ export function createSnowLumaManager({ getConfig, log, savePassword }) {
     agreements,
     consent,
     resetPassword,
+    setPassword,
+    /** 现在存的控制台密码（面板「显示密码」用，只在本机面板里看得到） */
+    password: () => cfg().webuiPassword || '',
     canLogin,
     get ownsProcess() {
       return Boolean(child)
+    },
+    get lowIntegrity() {
+      return lowIntegrity
     },
     get lastAttach() {
       return lastAttach

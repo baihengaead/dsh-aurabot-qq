@@ -47,7 +47,7 @@ export async function startMockOneBot({ selfId = '20000002', token = 'mock-token
   let msgSeq = 1000
   const faces = new Map()
   const qzone = new Map()
-  const state = { failRecord: false, roles: {} } // roles: 群号 → 机器人在群里的身份（默认群主）
+  const state = { failRecord: false, roles: {}, favorites: [] } // favorites：机器人号 QQ 收藏表情的地址 // roles: 群号 → 机器人在群里的身份（默认群主）
 
   function handle(action, params) {
     calls.push({ action, params, t: Date.now() })
@@ -65,6 +65,7 @@ export async function startMockOneBot({ selfId = '20000002', token = 'mock-token
         faces.set(id, '')
         return { emoji_id: id }
       }
+      case 'fetch_custom_face': return state.favorites.slice(0, params.count || 48)
       case 'modify_custom_face': faces.set(params.emoji_id, params.desc); return null
       case 'delete_custom_face': faces.delete(params.emoji_id); return null
       case 'send_qzone_msg': {

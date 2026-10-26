@@ -6,7 +6,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from '
 import { join } from 'node:path'
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { imageSize, mimeOf, stickerSizeOk } from '../chat/inbound.js'
-import { segmentBytes } from '../core/net.js'
+import { segmentBytes, fetchImage } from '../core/net.js'
 import { askModel, canSeeImages } from '../core/llm.js'
 
 const dir = () => dataDir('stickers')
@@ -68,7 +68,8 @@ export function pickForReply(items, replyText) {
 
 /** 超过上限时该清掉哪张：只看偷来的，最少被发过的里最老的那张。 */
 export function pickEvict(items) {
-  const pool = items.filter((i) => i.from !== 'manual' && i.from !== 'panel')
+  // 主人加的、从 QQ 收藏导进来的不清（那些本来就在机器人号的收藏里）
+  const pool = items.filter((i) => !['manual', 'panel', 'qq', 'tool'].includes(i.from))
   if (!pool.length) return null
   return pool.slice().sort((a, b) => (a.uses || 0) - (b.uses || 0) || (a.lastUsed || a.at || 0) - (b.lastUsed || b.at || 0))[0]
 }
@@ -269,5 +270,52 @@ export function createStickerStore({ dsh, getConfig, onebot, log }) {
     return { type: 'image', data: { file: 'base64://' + readFileSync(p).toString('base64'), sub_type: 1, summary: `[${item.name || '表情'}]` } }
   }
 
-  return { collect, addFromBuffer, saveFromSegment, remove, rename, segmentFor, markUsed, trim, library: loadLibrary, match: (q) => matchSticker(loadLibrary().items, q), pickForReply: (t) => pickForReply(loadLibrary().items, t) }
+  /**
+   * 把机器人号 QQ「我喜欢的」里已有的表情导进表情库（fetch_custom_face）。已经有的跳过；
+   * 不再往 QQ 收藏里加一遍。开了「看图起名」就在后台一张张起名。
+   */
+  let importing = null
+  async function importFromQQ({ limit = getConfig().stickers.maxLibrary } = {}) {
+    if (importing) return importing
+    importing = (async () => {
+      let urls
+      try {
+        const r = await onebot.call('fetch_custom_face', { count: Math.max(1, Math.min(500, Number(limit) || 300)) }, { timeoutMs: 30000 })
+        urls = (Array.isArray(r) ? r : r?.data || []).map((x) => (typeof x === 'string' ? x : x?.url || '')).filter(Boolean)
+      } catch (error) {
+        return { ok: false, message: '读不到机器人号的 QQ 收藏表情：' + error.message }
+      }
+      let added = 0
+      let existed = 0
+      let failed = 0
+      const named = []
+      for (const url of urls) {
+        let buf
+        try { buf = await fetchImage(url, { maxBytes: 5 * 1024 * 1024 }) } catch (error) { failed++; continue }
+        const md5 = createHash('md5').update(buf).digest('hex')
+        if (loadLibrary().items.some((i) => i.md5 === md5)) { existed++; continue }
+        const r = await addFromBuffer(buf, { from: 'qq', toQQ: false })
+        if (r.ok && !r.existed) { added++; named.push({ md5, buf }) } else failed++
+      }
+      log.info(`从 QQ 收藏导入表情：新加 ${added} 张，已有 ${existed} 张${failed ? `，${failed} 张下不来` : ''}`)
+      // 后台起名（一张张来，别一下子打满模型）
+      if (named.length && getConfig().stickers.caption) {
+        ;(async () => {
+          for (const { md5, buf } of named) {
+            const { name, tags } = await caption(buf, mimeOf(buf), '')
+            const l = loadLibrary()
+            const it = l.items.find((i) => i.md5 === md5)
+            if (!it || it.name) continue
+            it.name = name || '表情'
+            if (tags.length) it.tags = tags
+            saveLibrary(l)
+          }
+        })().catch((error) => log.warn('给导入的表情起名出错：', error.message))
+      }
+      return { ok: true, added, existed, failed, total: urls.length, message: urls.length ? `QQ 收藏里有 ${urls.length} 张：新导入 ${added} 张，已经有 ${existed} 张${failed ? `，${failed} 张下载失败` : ''}${added && getConfig().stickers.caption ? '。名字在后台慢慢起' : ''}` : 'QQ 收藏里没有表情' }
+    })().finally(() => { importing = null })
+    return importing
+  }
+
+  return { importFromQQ, collect, addFromBuffer, saveFromSegment, remove, rename, segmentFor, markUsed, trim, library: loadLibrary, match: (q) => matchSticker(loadLibrary().items, q), pickForReply: (t) => pickForReply(loadLibrary().items, t) }
 }

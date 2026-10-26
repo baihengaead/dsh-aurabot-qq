@@ -337,3 +337,58 @@ test('api.reply 在群里以引用回复发出；api.isOwner 认得主人', asyn
   const c = await until(() => mock.calls.find((x) => x.action === 'send_group_msg' && x.params.message.some((s) => s.data?.text === '你好')))
   assert.ok(c.params.message.some((s) => s.type === 'reply' && String(s.data.id) === '4242'))
 })
+
+// 一张能过表情尺寸检查的小图（PNG 头 + 宽高）
+function fakePng(w, h, salt = 0) {
+  const b = Buffer.alloc(64 + salt)
+  b[0] = 0x89; b[1] = 0x50; b[2] = 0x4e; b[3] = 0x47
+  b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20)
+  b[40] = salt
+  return b
+}
+
+test('#3 表情：从 QQ 收藏导入（已有的跳过、不再往 QQ 里加一遍）；主人让她存刚发的那张', async () => {
+  const fav = [fakePng(200, 200, 1), fakePng(200, 200, 2)].map((b) => 'base64://' + b.toString('base64'))
+  mock.state.favorites = fav
+  const adds = mock.calls.filter((c) => c.action === 'add_custom_face').length
+  const r = (await fake.call('/sticker/import-qq')).json()
+  assert.equal(r.ok, true, r.message)
+  assert.equal(r.added, 2)
+  assert.equal((await fake.call('/sticker/import-qq')).json().existed, 2, '第二次全是已有的')
+  assert.equal(mock.calls.filter((c) => c.action === 'add_custom_face').length, adds, '没往 QQ 收藏里重复加')
+  const lib = (await fake.call('/stickers')).json().items
+  assert.equal(lib.filter((i) => i.from === 'qq').length, 2)
+
+  // 主人私聊发来一张表情，再让她存（模拟测试里调工具）
+  const png = fakePng(180, 180, 7)
+  mock.push(priv('看这个'))
+  mock.push({ message_type: 'private', sub_type: 'friend', user_id: Number(OWNER), message_id: 777, sender: { user_id: Number(OWNER), nickname: 'xiaoming' }, message: [{ type: 'image', data: { file: 'base64://' + png.toString('base64'), sub_type: 1, summary: '[动画表情]' } }] })
+  await sleep(500)
+  const t = (await fake.call('/modules/tool', { as: 'owner', kind: 'private', name: 'qq_save_sticker', args: { name: '测试表情' } })).json()
+  assert.equal(t.ok, true, t.message)
+  assert.match(t.result.message, /存好了|已经有这张/)
+  const other = (await fake.call('/modules/tool', { as: 'other', kind: 'private', name: 'qq_save_sticker', args: {} })).json()
+  assert.ok(!other.ok || other.result.ok === false, '别人让她存不行')
+})
+
+test('#3 控制台密码：不合格的不会只改配置；主人设的密码要真的去 SnowLuma 改', async () => {
+  const before = api.getConfig().snowluma.webuiPassword
+  const r = (await fake.call('/save', { snowluma: { webuiPassword: 'weak' } })).json()
+  assert.equal(r.ok, false)
+  assert.match(r.message, /控制台密码没改.*至少 10 位/)
+  assert.equal(api.getConfig().snowluma.webuiPassword, before)
+  const { passwordProblems } = await import('../src/snowluma/manager.js')
+  assert.deepEqual(passwordProblems('Abcdefgh1!'), [])
+  assert.deepEqual(passwordProblems('abc def'), ['至少 10 位', '要有大写字母', '要有符号（比如 ! @ #）', '不能有空格'])
+  // 这台测试机没装 SnowLuma：好密码也改不了，会说清原因，配置不动
+  const g = (await fake.call('/save', { snowluma: { webuiPassword: 'Abcdefgh1!' } })).json()
+  assert.equal(g.ok, false)
+  assert.equal(api.getConfig().snowluma.webuiPassword, before)
+})
+
+test('#1 重新连接：等结果再回话，连上了就说连上了', async () => {
+  const r = (await fake.call('/onebot/reconnect')).json()
+  assert.equal(r.ok, true, r.message)
+  assert.equal(r.message, '连上了')
+  assert.equal((await fake.call('/state')).json().onebot.problem, '')
+})

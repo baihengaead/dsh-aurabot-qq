@@ -1,4 +1,4 @@
-// 「Ta挑」模式：只把表情递给她，喜欢才收；「全都偷」模式仍然看到就收。
+// 「她挑」模式：只把表情递给她，喜欢才收；「全都偷」模式仍然看到就收。
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs'
@@ -63,14 +63,14 @@ const send = async (text, buf) => {
   await wait(1500)
 }
 
-test('Ta挑：没让她收就不收，但会收到提示', async () => {
+test('她挑：没让她收就不收，但会收到提示', async () => {
   await send('随便聊聊', png(1))
   const t = fake.turns.at(-1)
   assert.match(String(t.userText), /qq_collect_sticker/, '应该给她一句"喜欢就收"的提示')
   assert.equal(library().length, 0, '她没说要收，库里应该还是空的')
 })
 
-test('Ta挑：她调了工具才真的收下，而且名字是她给的', async () => {
+test('她挑：她调了工具才真的收下，而且名字是她给的', async () => {
   await send('收下吧收下', png(2))
   const t = fake.turns.at(-1)
   const call = t.toolCalls.find((c) => c.name === 'qq_collect_sticker')
