@@ -40,6 +40,7 @@ const hub = {
   lastTextOf: () => hubState.text,
   speakersOf: () => hubState.speakers,
   prevTextOf: () => hubState.prev || '',
+  groupNameOf: (gid) => (String(gid) === '1129624985' ? '肥鱼群' : ''),
 }
 const line = (text, who = '小明') => ({ chatId: 'private:10000001', who, text })
 const day = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -89,6 +90,40 @@ test('主人私聊里问起群里的事：才补今天的群聊记录，并标�
 
   // 群里说话 → 不加（这是群聊本身，不需要背景）
   assert.doesNotMatch(m2.contextFor({ kind: 'group', groupId: '1129624985', chatId: 'group:1129624985' }, 'sid'), /群聊记录/)
+})
+
+test('群聊摘要：开关 / 每个群条数 / 群白名单 / 带上群名', () => {
+  const today = day(new Date())
+  const rows = []
+  for (let i = 1; i <= 40; i++) rows.push({ chatId: 'group:1129624985', who: '阿花', text: '甲群消息' + i })
+  for (let i = 1; i <= 5; i++) rows.push({ chatId: 'group:999', who: '小明', text: '乙群消息' + i })
+  logs.set(today, rows)
+  hubState.text = '群里今天聊了什么'
+  const priv = { kind: 'private', userId: '10000001', chatId: 'private:10000001' }
+  const mk = (ob) => createMemoryStore({
+    dsh,
+    getConfig: () => normalize({ model: { provider: 'p', model: 'm' }, ownerQQ: '10000001', group: { ownerBrief: ob } }),
+    hub,
+    log: { info() {}, warn() {}, debug() {} },
+  })
+
+  // 关掉 → 什么都不加
+  assert.doesNotMatch(mk({ enabled: false }).contextFor(priv, 'sid'), /今天群里的情况/)
+
+  // 打开、每个群 3 条 → 只出现最后 3 条，并带上群名
+  const out = mk({ enabled: true, lines: 3 }).contextFor(priv, 'sid')
+  assert.match(out, /群「肥鱼群」（1129624985）/)
+  assert.match(out, /甲群消息40/)
+  assert.doesNotMatch(out, /甲群消息37/, '超过条数的不要')
+
+  // 白名单只留一个群 → 另一个群不出现
+  const only = mk({ enabled: true, lines: 5, groups: ['1129624985'] }).contextFor(priv, 'sid')
+  assert.match(only, /甲群消息40/)
+  assert.doesNotMatch(only, /乙群消息/)
+
+  // 上限 30：填 999 会被夹到 30
+  const capped = mk({ enabled: true, lines: 999 }).contextFor(priv, 'sid')
+  assert.match(capped, /今天的最后 30 条/)
 })
 
 test('整理：提炼记忆、相处经验和说话方式；同一天再整理只处理新增的聊天', async () => {

@@ -1322,6 +1322,8 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     deleteChatLog,
     sessions: () => map().chats,
     groupName,
+    // 同步版：只读已经缓存到的群名（没查过就返回空，调用方自己退回群号）
+    groupNameOf: (gid) => groupNames.get(String(gid)) || '',
     stats: () => ({ ...stats }),
     get lastChatAt() { return lastChatAt },
     get lastOwnerChatAt() { return lastOwnerChatAt },

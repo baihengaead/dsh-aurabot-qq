@@ -402,12 +402,14 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
   const GROUP_TALK = /(群|群聊|群里|他们|大家|那些人在聊)/
 
   /**
-   * 主人在私聊里问起群里的事：把「今天」的群聊流水当参考放进来。
-   * 只在主人私聊 + 这一句确实提到群时才给；块里明确写清「这不是主人对你说的」。
+   * 主人在私聊里问起群里的事：把「今天」的群聊流水当成她自己的见闻补进上下文。
+   * 面板「聊天 → 主人私聊」里可以关掉、调每个群给几条、限定只取哪些群。
    */
   function groupBackdrop (chat, sessionId) {
     if (!chat || chat.kind !== 'private') return ''
     const all = getConfig()
+    const ob = all.group && all.group.ownerBrief
+    if (!ob || ob.enabled === false) return ''
     if (!all.ownerQQ || String(chat.userId) !== String(all.ownerQQ)) return ''
     const q = hub?.lastTextOf?.(sessionId) || ''
     if (!GROUP_TALK.test(q)) return ''
@@ -417,19 +419,39 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
     } catch (error) {
       return ''
     }
+    // 群白名单：配了就只取这些群（不配 = 全部群）
+    const allow = new Set((ob.groups || []).map(String))
+    if (allow.size) rows = rows.filter((l) => allow.has(String(l.chatId).slice(6)))
     if (!rows.length) return ''
-    const tail = rows.slice(-24)
-    const body = tail.map((l) => {
-      const who = l.who === 'bot' ? '我' : (l.who || '有人')
-      return `${who}：${String(l.text).replace(/\s+/g, ' ').trim().slice(0, 100)}`
-    }).join('\n')
-    log.info(`主人问起群里的事：给私聊上下文补了今天最近 ${tail.length} 行群聊记录`)
+    // 按群分组，每个群各取最后 limit 条（最多 30），整体再兜一个上限
+    const limit = Math.max(1, Math.min(30, Number(ob.lines) || 24))
+    const byGroup = new Map()
+    for (const l of rows) {
+      const gid = String(l.chatId).slice(6)
+      if (!byGroup.has(gid)) byGroup.set(gid, [])
+      byGroup.get(gid).push(l)
+    }
+    const blocks = []
+    let total = 0
+    for (const [gid, list] of byGroup) {
+      if (total >= 120) break
+      const tail = list.slice(-limit)
+      total += tail.length
+      const name = hub?.groupNameOf?.(gid) || ''
+      const title = name && name !== gid ? `群「${name}」（${gid}）` : `群 ${gid}`
+      const body = tail.map((l) => {
+        const who = l.who === 'bot' ? '我' : (l.who || '有人')
+        return `${who}：${String(l.text).replace(/\s+/g, ' ').trim().slice(0, 100)}`
+      }).join('\n')
+      blocks.push(`【${title} · 今天的最后 ${tail.length} 条】\n${body}`)
+    }
+    log.info(`主人问起群里的事：补了 ${blocks.length} 个群、共 ${total} 条今天的群聊记录`)
     // 措辞当成「她自己的见闻」，而不是「给她看的材料」——
     // 否则她会回一句「我看到了」，而不是接着聊群里那件事本身。
-    return '（你今天在群里经历过的这些事，是你自己的见闻 —— **不是主人发给你的消息**，别当成主人在跟你说话。'
+    return '（下面是你今天在几个群里经历过的片段，属于你自己的见闻 —— **不是主人发给你的消息**，别当成主人在跟你说话。'
       + '主人提到群里的事时，就像回忆自己白天的经历一样接着说下去，不用特意说「我看到了」「我知道了」；'
-      + '群里的私事也别主动往外讲。）\n'
-      + '【今天群里的情况】\n' + body + '\n【以上是今天群里的情况】'
+      + '群里的私事也别主动往外讲。想知道某个具体群的情况，就看你记得的那个群。）\n'
+      + blocks.join('\n\n') + '\n【以上是今天群里的情况】'
   }
 
   /** 给系统提示词上下文用：人物小档案 + 相处经验（常驻）+ 按这一轮对方说的话检索到的记忆。 */

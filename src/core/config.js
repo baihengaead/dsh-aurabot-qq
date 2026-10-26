@@ -52,7 +52,12 @@ export const DEFAULTS = {
     seeOwn: true, // 画完让能看图的模型看一眼，她才知道自己画成了什么（多一次调用）
   },
   persona: { current: 'dafeiyu' },
-  group: { ...DEFAULT_GROUP_POLICY, overrides: {} },
+  group: {
+    ...DEFAULT_GROUP_POLICY,
+    overrides: {},
+    // 主人在私聊里问起群里的事时，把今天的群聊记录当成她自己的见闻补进上下文
+    ownerBrief: { enabled: true, lines: 24, groups: [] },
+  },
   voice: {
     enabled: true,
     // auto = 先 edge-tts，不行用 Windows 语音；edge / windows / cosyvoice / gptsovits / http = 指定引擎（失败都会退回 Windows 语音）
@@ -207,6 +212,11 @@ export function normalize(raw) {
   c.ownerLevel = LEVELS.includes(c.ownerLevel) ? c.ownerLevel : 'full'
   c.allow = { private: qqList(c.allow.private), groups: qqList(c.allow.groups) }
   const g = c.group
+  // 主人私聊里的「群里发生了什么」：开关、每个群给几条（1~30）、只取哪些群（空 = 全部）
+  if (!g.ownerBrief || typeof g.ownerBrief !== 'object') g.ownerBrief = { ...DEFAULTS.group.ownerBrief }
+  g.ownerBrief.enabled = bool(g.ownerBrief.enabled, true)
+  g.ownerBrief.lines = num(g.ownerBrief.lines, 24, 1, 30)
+  g.ownerBrief.groups = qqList(g.ownerBrief.groups)
   g.wakeWords = (Array.isArray(g.wakeWords) ? g.wakeWords : String(g.wakeWords || '').split(/[\s,，]+/)).map((s) => String(s).trim()).filter(Boolean)
   g.interjectChance = num(g.interjectChance, 0.15, 0, 1)
   g.cooldownSec = num(g.cooldownSec, 90, 0, 86400)

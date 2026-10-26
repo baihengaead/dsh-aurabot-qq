@@ -838,7 +838,32 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h('div', { className: 'ab-flex' }, h('input', { className: 'ab-input', placeholder: '群号', value: newGid, onChange: (e) => setNewGid(e.target.value.replace(/\D/g, '')) }),
             h(Btn, { small: true, disabled: !newGid, onClick: () => { setDraft(setPath(draft, 'group.overrides', { ...overrides, [newGid]: { interjectChance: draft.group.interjectChance } })); setNewGid('') } }, '添加')),
         ),
+        h(Card, { title: '主人私聊', right: f.sw('group.ownerBrief.enabled'), desc: '主人在私聊里问起群里的事时，把今天群里的最近几条聊天记录当成「她自己的见闻」补进上下文 —— 没提群就不会加，也不会发给别人。' },
+          h(Row, { label: '每个群能知道多少', hint: '越少越省上下文；最多 30 条' }, f.range('group.ownerBrief.lines', 1, 30, 1, (v) => v + ' 条')),
+          h(Row, { label: '只从这些群取', hint: '不选 = 所有群；只影响「补哪几个群的记录」' },
+            h(GroupPicker, { value: draft.group.ownerBrief.groups || [], fallback: draft.allow.groups || [], onChange: (v) => setDraft(setPath(draft, 'group.ownerBrief.groups', v)) })),
+          !draft.group.ownerBrief.enabled ? h('div', { className: 'ab-note', style: { marginTop: 10 } }, '关着：私聊里问群里的事，她只能靠长期记忆（整理过的那些），看不到今天的原始聊天。') : null,
+        ),
       )
+    }
+
+    /** 群多选：点一下选中/取消；选中的群才会被拿来补进私聊上下文。 */
+    function GroupPicker({ value, onChange, fallback }) {
+      const [list, setList] = useState(null)
+      useEffect(() => { get('/groups/roles').then((r) => setList(r.list || [])).catch(() => setList([])) }, [])
+      const has = (id) => (value || []).map(String).includes(String(id))
+      const toggle = (id) => onChange(has(id) ? (value || []).filter((x) => String(x) !== String(id)) : [...(value || []), String(id)])
+      if (list === null) return h('span', { className: 'ab-muted ab-small' }, h('i', { className: 'ab-spin' }), ' 读取群列表…')
+      // 群管模块关着时查不到群名，就用白名单里的群号兜底
+      const rows = list.length ? list : (fallback || []).map((gid) => ({ groupId: gid }))
+      if (!rows.length) return h('span', { className: 'ab-muted ab-small' }, '还没有群（先在「权限」页把群号加进白名单）')
+      return h('div', { className: 'ab-flex', style: { flexWrap: 'wrap', gap: 6 } },
+        rows.map((g) => h(Btn, {
+          key: g.groupId,
+          small: true,
+          kind: has(g.groupId) ? 'primary' : undefined,
+          onClick: () => toggle(g.groupId),
+        }, (g.name && g.name !== g.groupId ? g.name : g.groupId) + (has(g.groupId) ? ' ✓' : ''))))
     }
 
     function Model({ draft, setDraft, toast }) {
