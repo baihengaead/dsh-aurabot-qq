@@ -30,8 +30,6 @@ function fakePng(w, h, salt = 0) {
 
 // 「模型」脚本
 async function brain({ preset, text, images, callTool }) {
-  if (text.includes('给表情包起名字')) return '可爱的小鲸鱼 #开心 #卖萌'
-  if (text.includes('这是你刚画出来的图')) return '一只蓝蓝色的小鲸鱼，圆滚滚的，尾巴翘着'
   if (text.includes('【空间互动')) { qzonePrompts.push(text); return '哈哈好看' }
   if (/^【(私聊|群聊)/.test(text) && text.includes('戳了戳你')) return '干嘛戳我<poke>'
   if (/^【私聊/.test(text) && text.includes('表情改名测试')) { const m = text.match(/把「(.+?)」/); const r = await callTool('qq_edit_sticker', { sticker: m[1], new_name: '改过的名字', tags: ['开心'] }); return r.message }

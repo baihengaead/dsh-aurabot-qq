@@ -95,7 +95,7 @@ async function valueToBuffer (v) {
   throw new Error('生图接口返回的既不是图片地址也不是图片')
 }
 
-export function createImageGen({ getConfig, log, local, dsh, lookTurn }) {
+export function createImageGen({ getConfig, log, local, dsh }) {
   async function generate(prompt) {
     const c = getConfig().imageGen
     // 本地接口接管：用用户自己电脑上的画图服务
@@ -173,37 +173,22 @@ export function createImageGen({ getConfig, log, local, dsh, lookTurn }) {
    */
   async function look (buf, prompt) {
     const c = getConfig().imageGen
-    if (c.seeOwn === false) return ''
+    if (!dsh || c.seeOwn === false) return ''
     // 模型明确看不了图就别浪费一次调用
-    if (dsh && (await canSeeImages(dsh, getConfig())) === false) return ''
-    // 优先走她自己的会话（agent 那条路的图片入口是通的）；askModel 那条 DSH 会拒图
-    if (typeof lookTurn === 'function') {
-      try {
-        const t = String(await lookTurn(buf, prompt) || '').trim()
-        if (t) {
-          log.info(`画完自己看了一眼：${t.slice(0, 60)}`)
-          return t
-        }
-        log.warn('画完想看自己画的图，但模型没返回文字')
-        return ''
-      } catch (error) {
-        log.warn('画完看图失败：', error.message)
-        return ''
-      }
-    }
-    if (!dsh) return ''
+    if ((await canSeeImages(dsh, getConfig())) === false) return ''
     try {
       const text = await askModel(dsh, {
         cfg: getConfig(),
         system: '你刚画完一张图，现在要跟朋友讲你画了什么。用第一人称，两三句话说清画面的主体、风格、颜色和细节，语气自然，别用「这张图片展示了」这种说法。',
         text: `画这张图时用的提示词：${String(prompt || '').slice(0, 500)}`,
         images: [{ data: buf.toString('base64'), mediaType: mimeOf(buf) }],
-        maxTokens: 300,
+        // ⚠ 别给太小：模型会先思考，预算太小会被思考吃光，正文就是空的（表情起名踩过）
+        maxTokens: 1000,
         temperature: 0.5,
       })
       const t = String(text || '').trim()
       if (t) log.info(`画完自己看了一眼：${t.slice(0, 60)}`)
-      else log.warn('画完想看自己画的图，但模型没返回文字（和表情起名是同一个毛病）')
+      else log.warn('画完想看自己画的图，但模型没返回文字')
       return t
     } catch (error) {
       log.debug('画完看图失败（模型可能不支持看图）：', error.message)

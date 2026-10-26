@@ -9,7 +9,7 @@
 //
 // ⚠ 安全默认：总开关关、试运行开。不手动打开，一句都不会真的发到 QQ。
 
-import { readFileSync, existsSync, writeFileSync, unlinkSync, statSync, mkdirSync, readdirSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync, unlinkSync, statSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
@@ -689,42 +689,6 @@ export function apply(ctx) {
       return { ok: false, message: error.message, list: [] }
     }
   })
-  // 诊断用：插件自己的「看图」为什么拿不到文字 —— 用一张真图把三种传图方式试完
-  // （临时接口，查清楚就可以删）
-  route('/debug/look-test', async () => {
-    let img = null
-    for (const sub of ['imagegen', 'stickers']) {
-      try {
-        const dir = dataDir(sub)
-        if (!existsSync(dir)) continue
-        const newest = readdirSync(dir)
-          .filter((f) => /\.(png|jpe?g|webp|gif)$/i.test(f))
-          .map((f) => ({ f, at: statSync(join(dir, f)).mtimeMs }))
-          .sort((a, b) => b.at - a.at)[0]
-        if (!newest) continue
-        const buf = readFileSync(join(dir, newest.f))
-        img = { data: buf.toString('base64'), mediaType: mimeOf(buf), name: newest.f, bytes: buf.length }
-        break
-      } catch (error) {}
-    }
-    if (!img) return { ok: false, message: '找不到可用的图片文件' }
-    const out = []
-    const probe = async (label, fn) => {
-      const t = Date.now()
-      try { out.push({ case: label, ok: true, ms: Date.now() - t, ...(await fn()) }) } catch (error) { out.push({ case: label, ok: false, ms: Date.now() - t, message: String((error && error.message) || error).slice(0, 240) }) }
-    }
-    await probe('① 纯文字（对照）', async () => ({ text: String(await askModel(ctx, { cfg, system: '只回复两个字', text: '在吗', maxTokens: 300 })).slice(0, 60) }))
-    await probe('② askModel + 真图', async () => {
-      const text = await askModel(ctx, { cfg, system: '用一句话说这张图里有什么', text: '这是什么', images: [{ data: img.data, mediaType: img.mediaType }], maxTokens: 300 })
-      return { text: String(text || '').slice(0, 120), empty: !text }
-    })
-    await probe('③ 走她的 agent 会话（runSystemTurn + 图片）', async () => {
-      const text = await hub.runSystemTurn('look', 'QQ · 看图', '用一句话说这张图里有什么。', { images: [{ data: img.data, mediaType: img.mediaType, name: 'probe' }], timeoutMs: 90000 })
-      return { text: String(text || '').slice(0, 120), empty: !text }
-    })
-    return { ok: true, model: cfg.model, image: { name: img.name, mediaType: img.mediaType, bytes: img.bytes }, out }
-  })
-
   route('/model/ping', async (req) => {
     const b = await readBody(req)
     const t = Date.now()
