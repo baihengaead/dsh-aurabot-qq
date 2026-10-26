@@ -133,6 +133,23 @@ test('接口回了别的东西：报错而不是发一张坏图', async () => {
   } finally { globalThis.fetch = orig }
 })
 
+test('画完看一眼：拿到描述；关掉开关 / 没有宿主就不看', async () => {
+  const { createFakeDsh } = await import('./helpers/fake-dsh.js')
+  const fake = createFakeDsh({})
+  const custom = { method: 'GET', url: 'https://x.test/{prompt}', params: [] }
+  const cfg = { model: { provider: 'p', model: 'm' }, imageGen: baseGen(custom, { seeOwn: true }) }
+
+  const gen = createImageGen({ getConfig: () => cfg, log, local: null, dsh: fake.ctx })
+  const seen = await gen.look(PNG, '一只白鲸')
+  assert.ok(seen.length > 0, '应该拿到描述，实际拿到: ' + JSON.stringify(seen))
+
+  const off = createImageGen({ getConfig: () => ({ ...cfg, imageGen: { ...cfg.imageGen, seeOwn: false } }), log, local: null, dsh: fake.ctx })
+  assert.equal(await off.look(PNG, '一只白鲸'), '', '关掉就不看')
+
+  const noDsh = createImageGen({ getConfig: () => cfg, log, local: null })
+  assert.equal(await noDsh.look(PNG, '一只白鲸'), '', '没有宿主就不看')
+})
+
 test('enabled()：自定义模式看地址有没有填', () => {
   const mk = (custom) => createImageGen({ getConfig: () => ({ imageGen: baseGen(custom) }), log, local: null }).enabled()
   assert.equal(mk({ method: 'GET', url: 'https://x.test/{prompt}' }), true)

@@ -5,6 +5,7 @@
 
 import { fetchImage } from '../core/net.js'
 import { mimeOf } from '../chat/inbound.js'
+import { askModel } from '../core/llm.js'
 
 /** 把模板里的 {占位符} 替换掉；不认识的占位符原样留着。 */
 function fill (tpl, vars) {
@@ -94,7 +95,7 @@ async function valueToBuffer (v) {
   throw new Error('生图接口返回的既不是图片地址也不是图片')
 }
 
-export function createImageGen({ getConfig, log, local }) {
+export function createImageGen({ getConfig, log, local, dsh }) {
   async function generate(prompt) {
     const c = getConfig().imageGen
     // 本地接口接管：用用户自己电脑上的画图服务
@@ -166,6 +167,31 @@ export function createImageGen({ getConfig, log, local }) {
     throw new Error('生图服务没有返回图片')
   }
 
+  /**
+   * 画完自己看一眼：让能看图的模型描述一下成品，她才「知道」自己画成了什么，
+   * 用户追问「画得怎么样」时才有话说。模型看不了图就安静跳过。
+   */
+  async function look (buf, prompt) {
+    const c = getConfig().imageGen
+    if (!dsh || c.seeOwn === false) return ''
+    try {
+      const text = await askModel(dsh, {
+        cfg: getConfig(),
+        system: '你刚画完一张图，现在要跟朋友讲你画了什么。用第一人称，两三句话说清画面的主体、风格、颜色和细节，语气自然，别用「这张图片展示了」这种说法。',
+        text: `画这张图时用的提示词：${String(prompt || '').slice(0, 500)}`,
+        images: [{ data: buf.toString('base64'), mediaType: mimeOf(buf) }],
+        maxTokens: 300,
+        temperature: 0.5,
+      })
+      const t = String(text || '').trim()
+      if (t) log.info(`画完自己看了一眼：${t.slice(0, 60)}`)
+      return t
+    } catch (error) {
+      log.debug('画完看图失败（模型可能不支持看图）：', error.message)
+      return ''
+    }
+  }
+
   const enabled = () => {
     if (local?.active('image')) return true
     const c = getConfig().imageGen
@@ -173,5 +199,5 @@ export function createImageGen({ getConfig, log, local }) {
     return c.provider === 'custom' ? Boolean(c.custom && c.custom.url) : Boolean(c.baseUrl && c.model)
   }
 
-  return { generate, enabled }
+  return { generate, look, enabled }
 }

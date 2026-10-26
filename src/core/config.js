@@ -49,6 +49,7 @@ export const DEFAULTS = {
     size: '1024x1024',
     stylePrompt: '', // 每次生图自动加在前面的风格描述
     ownerOnly: true, // 只有主人能让她画
+    seeOwn: true, // 画完让能看图的模型看一眼，她才知道自己画成了什么（多一次调用）
   },
   persona: { current: 'dafeiyu' },
   group: { ...DEFAULT_GROUP_POLICY, overrides: {} },
@@ -281,6 +282,7 @@ export function normalize(raw) {
   if (!['sft', 'instruct'].includes(c.voice.cosyvoice.mode)) c.voice.cosyvoice.mode = 'sft'
   c.imageGen.enabled = bool(c.imageGen.enabled, false)
   c.imageGen.ownerOnly = bool(c.imageGen.ownerOnly, true)
+  c.imageGen.seeOwn = bool(c.imageGen.seeOwn, true)
   if (!/^\d{3,4}x\d{3,4}$/.test(String(c.imageGen.size))) c.imageGen.size = '1024x1024'
   // provider：custom = 自己填接口（GET/POST + 自定义参数），其它一律按 OpenAI 兼容
   c.imageGen.provider = c.imageGen.provider === 'custom' ? 'custom' : 'openai'
