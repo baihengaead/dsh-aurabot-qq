@@ -402,7 +402,8 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
   const GROUP_TALK = /(群|群聊|群里|他们|大家|那些人在聊)/
 
   /**
-   * 主人在私聊里问起群里的事：把「今天」的群聊流水当成她自己的见闻补进上下文。
+   * 主人在私聊里问起群里的事：把「最近」的群聊流水当成她自己的见闻补进上下文。
+   * 跨午夜也有效（今天 + 昨天的流水，只取 24 小时内的）。
    * 面板「聊天 → 主人私聊」里可以关掉、调每个群给几条、限定只取哪些群。
    */
   function groupBackdrop (chat, sessionId) {
@@ -413,9 +414,19 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
     if (!all.ownerQQ || String(chat.userId) !== String(all.ownerQQ)) return ''
     const q = hub?.lastTextOf?.(sessionId) || ''
     if (!GROUP_TALK.test(q)) return ''
+    const now = Date.now()
+    const cutoff = now - 86400_000
     let rows = []
     try {
-      rows = (hub?.chatLogOf?.(dayKey()) || []).filter((l) => l && String(l.chatId).startsWith('group:') && String(l.text || '').trim())
+      for (const dk of [dayKey(), dayKey(new Date(cutoff))]) {
+        for (const l of hub?.chatLogOf?.(dk) || []) {
+          if (!l || !String(l.chatId).startsWith('group:') || !String(l.text || '').trim()) continue
+          const t = Number(l.t) || 0
+          if (t && t < cutoff) continue
+          rows.push(l)
+        }
+      }
+      rows.sort((a, b) => (Number(a.t) || 0) - (Number(b.t) || 0))
     } catch (error) {
       return ''
     }
@@ -443,15 +454,15 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
         const who = l.who === 'bot' ? '我' : (l.who || '有人')
         return `${who}：${String(l.text).replace(/\s+/g, ' ').trim().slice(0, 100)}`
       }).join('\n')
-      blocks.push(`【${title} · 今天的最后 ${tail.length} 条】\n${body}`)
+      blocks.push(`【${title} · 最近 ${tail.length} 条】\n${body}`)
     }
-    log.info(`主人问起群里的事：补了 ${blocks.length} 个群、共 ${total} 条今天的群聊记录`)
+    log.info(`主人问起群里的事：补了 ${blocks.length} 个群、共 ${total} 条最近的群聊记录`)
     // 措辞当成「她自己的见闻」，而不是「给她看的材料」——
     // 否则她会回一句「我看到了」，而不是接着聊群里那件事本身。
-    return '（下面是你今天在几个群里经历过的片段，属于你自己的见闻 —— **不是主人发给你的消息**，别当成主人在跟你说话。'
+    return '（下面是你最近在几个群里经历过的片段，属于你自己的见闻 —— **不是主人发给你的消息**，别当成主人在跟你说话。'
       + '主人提到群里的事时，就像回忆自己白天的经历一样接着说下去，不用特意说「我看到了」「我知道了」；'
       + '群里的私事也别主动往外讲。想知道某个具体群的情况，就看你记得的那个群。）\n'
-      + blocks.join('\n\n') + '\n【以上是今天群里的情况】'
+      + blocks.join('\n\n') + '\n【以上是最近群里的情况】'
   }
 
   /** 给系统提示词上下文用：人物小档案 + 相处经验（常驻）+ 按这一轮对方说的话检索到的记忆。 */

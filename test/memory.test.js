@@ -75,7 +75,7 @@ test('主人私聊里问起群里的事：才补今天的群聊记录，并标�
   // 提到了群 → 带上，而且写清「是她的见闻、不是主人的话」
   hubState.text = '群里刚才聊什么了'
   const hit = m2.contextFor(priv('10000001'), 'sid')
-  assert.match(hit, /今天群里的情况/)
+  assert.match(hit, /最近群里的情况/)
   assert.match(hit, /不是主人发给你的消息/)
   assert.match(hit, /阿花：今天去看了海/)
   assert.match(hit, /我：我也想去/)
@@ -108,7 +108,7 @@ test('群聊摘要：开关 / 每个群条数 / 群白名单 / 带上群名', ()
   })
 
   // 关掉 → 什么都不加
-  assert.doesNotMatch(mk({ enabled: false }).contextFor(priv, 'sid'), /今天群里的情况/)
+  assert.doesNotMatch(mk({ enabled: false }).contextFor(priv, 'sid'), /最近群里的情况/)
 
   // 打开、每个群 3 条 → 只出现最后 3 条，并带上群名
   const out = mk({ enabled: true, lines: 3 }).contextFor(priv, 'sid')
@@ -123,7 +123,7 @@ test('群聊摘要：开关 / 每个群条数 / 群白名单 / 带上群名', ()
 
   // 上限 30：填 999 会被夹到 30
   const capped = mk({ enabled: true, lines: 999 }).contextFor(priv, 'sid')
-  assert.match(capped, /今天的最后 30 条/)
+  assert.match(capped, /最近 30 条/)
 })
 
 test('整理：提炼记忆、相处经验和说话方式；同一天再整理只处理新增的聊天', async () => {

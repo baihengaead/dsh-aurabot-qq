@@ -83,4 +83,10 @@ test('切到调试再切回来，各自接回原来的会话', async () => {
   assert.equal(await createdCount(), before, '切模式不该新建会话')
 })
 
+test('在侧栏会话里直接打字，也会更新 lastText（面板上下文靠它触发）', async () => {
+  const sid = entry().sessions.live
+  api.hub.onSessionEvent({ id: sid }, { type: 'user/message', data: { message: { content: [{ type: 'text', text: '群里今天聊什么了' }] } } })
+  assert.equal(api.hub.lastTextOf(sid), '群里今天聊什么了', '直接打的那句要能被上下文看到')
+})
+
 test.after(() => fake.dispose())

@@ -599,6 +599,16 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     if (!chatId || !event) return
     const st = turnState.get(key) || { lastTurn: -1, text: '', senders: new Set() }
     turnState.set(key, st)
+    // 在侧栏会话里直接打字（比如调试面板里问她「群里聊了什么」）也要记住这句话：
+    // 面板上下文（记忆召回、群聊摘要）靠 lastText 判断这一轮在说什么
+    if (event.type === 'user/message') {
+      const t = textOf((event.data || {}).message)
+      if (t) {
+        if (st.lastText) st.prevText = st.lastText
+        st.lastText = t.slice(-600)
+      }
+      return
+    }
     if (event.type === 'assistant/message') {
       const d = event.data || {}
       if (d.interrupted) return
