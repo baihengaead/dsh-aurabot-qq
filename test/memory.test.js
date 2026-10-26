@@ -71,11 +71,11 @@ test('主人私聊里问起群里的事：才补今天的群聊记录，并标�
   ])
   const priv = (uid) => ({ kind: 'private', userId: uid, chatId: `private:${uid}` })
 
-  // 提到了群 → 带上，而且写清是背景
+  // 提到了群 → 带上，而且写清「是她的见闻、不是主人的话」
   hubState.text = '群里刚才聊什么了'
   const hit = m2.contextFor(priv('10000001'), 'sid')
-  assert.match(hit, /今天的群聊记录/)
-  assert.match(hit, /这不是主人对你说的话/)
+  assert.match(hit, /今天群里的情况/)
+  assert.match(hit, /不是主人发给你的消息/)
   assert.match(hit, /阿花：今天去看了海/)
   assert.match(hit, /我：我也想去/)
 
