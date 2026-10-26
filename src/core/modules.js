@@ -235,7 +235,11 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
       },
       emit: (event, ...args) => emit(event, ...args),
       every: (ms, fn, label = '定时任务') => {
-        const t = setInterval(() => { Promise.resolve().then(fn).catch((error) => note(id, label, error)) }, Math.max(1000, Number(ms) || 60_000))
+        const t = setInterval(() => {
+          // 调试模式不跑定时任务：刷 B 站、逛空间、主动搭话、整理记忆这些都别在调试里自己动
+          if (getConfig().debug) return
+          Promise.resolve().then(fn).catch((error) => note(id, label, error))
+        }, Math.max(1000, Number(ms) || 60_000))
         t.unref?.()
         return track(() => clearInterval(t))
       },

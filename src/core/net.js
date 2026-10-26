@@ -21,7 +21,10 @@ export async function assertPublicUrl(url) {
   const host = u.hostname.replace(/^\[|\]$/g, '')
   if (host === 'localhost') throw new Error('不允许访问本机地址')
   const ips = isIP(host) ? [host] : (await lookup(host, { all: true })).map((x) => x.address)
-  if (!ips.length || ips.some(isPrivateIp)) throw new Error('不允许访问内网地址')
+  // 只要解析结果里有公网地址就放行：部分 DNS（代理 / 运营商）会给同一个域名同时返回
+  // 一个公网 A 记录和一个 IPv6 ULA（fdxx::），按「有一条是内网就拒绝」会误杀正常图片。
+  // 防 SSRF 的本意不变：解析结果全部是内网地址（或本机）时才拒绝。
+  if (!ips.length || ips.every(isPrivateIp)) throw new Error('不允许访问内网地址')
 }
 
 /**

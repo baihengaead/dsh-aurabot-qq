@@ -184,6 +184,11 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
   }
 
   function add({ text, about = '', aboutName = '', tags = [], importance = 0.5, source = 'tool', chatId = '' }) {
+    // 调试模式：什么都不写，只在日志里留一句（调试就是用来试人格又不污染记忆的）
+    if (getConfig().debug) {
+      log.info(`[调试] 不写记忆（${source}）：${String(text || '').slice(0, 80)}`)
+      return { ok: true, debug: true, message: '调试模式，没写进记忆' }
+    }
     const t = String(text || '').trim().slice(0, 200)
     if (!t) return { ok: false, message: '内容是空的' }
     const s = load()
@@ -640,6 +645,8 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
 
   /** 每分钟调一次：一天几个整理时间点（默认 04:00 / 16:00），到点且这个点今天还没跑过就整理。 */
   async function tick() {
+    // 调试模式不整理记忆（整理会把聊天流水变成长期记忆，正是要避免的）
+    if (getConfig().debug) return
     const cfg = getConfig().memory
     if (!cfg.enabled || !cfg.dailyConsolidate) {
       const cutoff = dayKey(new Date(Date.now() - 14 * 86400_000))

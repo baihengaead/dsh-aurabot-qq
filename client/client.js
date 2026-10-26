@@ -107,6 +107,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-deep:#9cc4f5;--ab-sea:#6
 .ab-seg button{border:0;background:transparent;padding:6px 14px;font:inherit;color:var(--ab-sub);cursor:pointer;border-left:1px solid var(--ab-line)}
 .ab-seg button:first-child{border-left:0}
 .ab-seg button.on{background:var(--ab-foam-2);color:var(--ab-deep);font-weight:600}
+.ab-seg.off{opacity:.45}
+.ab-seg.off button{cursor:not-allowed}
 .ab-note{padding:10px 12px;border-radius:10px;background:var(--ab-foam);color:var(--ab-text);font-size:12.5px;border:1px solid var(--ab-foam-2)}
 .ab-note.warn{background:rgba(191,135,0,.08);border-color:rgba(191,135,0,.25)}
 .ab-note.err{background:rgba(207,34,46,.07);border-color:rgba(207,34,46,.25)}
@@ -125,6 +127,12 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-deep:#9cc4f5;--ab-sea:#6
 .ab-sticker .tg{font-size:11px;color:var(--ab-dim);text-align:center;min-height:16px}
 .ab-sticker .x{position:absolute;top:4px;right:4px;opacity:0;transition:opacity .15s}
 .ab-sticker:hover .x{opacity:1}
+.ab-shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:10px}
+.ab-shot{border:1px solid var(--ab-line);border-radius:12px;padding:6px;background:var(--ab-card);display:flex;flex-direction:column;gap:6px;position:relative}
+.ab-shot img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;background:var(--ab-card-2);display:block}
+.ab-shot .cap{font-size:11px;color:var(--ab-dim);line-height:1.35;max-height:2.7em;overflow:hidden}
+.ab-shot .x{position:absolute;top:10px;right:10px;opacity:0;transition:opacity .15s}
+.ab-shot:hover .x{opacity:1}
 .ab-list{display:flex;flex-direction:column}
 .ab-li{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--ab-line)}
 .ab-li:first-child{border-top:0}
@@ -392,8 +400,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         h('input', { type: 'range', min, max, step: step || 1, value: value ?? min, onChange: (e) => onChange(Number(e.target.value)) }),
         h('span', { className: 'val' }, fmt ? fmt(value) : value))
     }
-    function Seg({ value, options, onChange }) {
-      return h('div', { className: 'ab-seg' }, options.map((o) => h('button', { key: o.value, type: 'button', className: value === o.value ? 'on' : '', onClick: () => onChange(o.value) }, o.label)))
+    function Seg({ value, options, onChange, disabled }) {
+      return h('div', { className: 'ab-seg' + (disabled ? ' off' : '') }, options.map((o) => h('button', { key: o.value, type: 'button', className: value === o.value ? 'on' : '', disabled: !!disabled, onClick: () => { if (!disabled) onChange(o.value) } }, o.label)))
     }
     function Empty({ icon, text }) {
       return h('div', { className: 'ab-empty' }, h('div', { className: 'big' }, icon || '🐋'), text)
@@ -480,7 +488,13 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       return h('div', { className: 'ab-grid' },
         h(UpdateNotes, { st, toast }),
         !cfg.enabled ? h('div', { className: 'ab-note warn' }, '总开关是关着的：大肥鱼现在不会收也不会发任何 QQ 消息。准备好了就在右上角打开。') : null,
-        cfg.enabled && cfg.dryRun ? h('div', { className: 'ab-note' }, '现在是试运行：她会照常思考回复，但只写进日志，不会真的发到 QQ。确认没问题后在右上角关掉「试运行」。') : null,
+        cfg.enabled && cfg.debug ? h('div', { className: 'ab-note warn' },
+          '现在是调试：她会照常思考回复，但既不发到 QQ，也不写任何记忆和聊天流水 —— 只出现在日志里。调试期间的对话不会被明天的记忆整理吸收，也不会影响正式上线后的她。',
+          h('div', { className: 'ab-flex', style: { marginTop: 6, alignItems: 'center' } },
+            h(Btn, { small: true, kind: 'primary', onClick: async () => { const r = await post('/debug/session'); toast(r.message || (r.ok ? '好了' : '没建好'), r.ok ? 'ok' : 'err') } }, '新建 / 打开调试会话'),
+            h('span', { className: 'ab-muted ab-small' }, '去左侧栏「Aurabot · QQ」工作区打开它，直接在输入框里跟她说话'))) : null,
+        cfg.enabled && cfg.debug ? h(Card, { title: '调试对话', desc: '在这里直接跟她说话：走她的人格和工具，但不经过 QQ、不写记忆。和左侧栏那个调试会话是同一个会话。' }, h(DebugChat, { toast })) : null,
+        cfg.enabled && !cfg.debug && cfg.dryRun ? h('div', { className: 'ab-note' }, '现在是试运行：她会照常思考回复，但只写进日志，不会真的发到 QQ。注意试运行**会照常写记忆**；只想试人格、不想留痕迹请切到「调试」。') : null,
         cfg.enabled && !conn ? h('div', { className: 'ab-note err' }, '还没连上 QQ 网关。去「连接」标签看看 SnowLuma 有没有装好、启动没有。 ', h('a', { href: '#', onClick: (e) => { e.preventDefault(); go('connect') } }, '去连接 →')) : null,
         h('div', { className: 'ab-grid ab-g4' },
           [['今天收到', s.received, '📥'], ['今天发出', s.sent, '📤'], ['语音条', s.voice, '🎙️'], ['表情包', s.stickers, '😺']].map(([l, n, ic]) => h('div', { key: l, className: 'ab-card ab-stat' }, h('span', { className: 'ic', 'aria-hidden': true }, ic), h('div', { className: 'n' }, n || 0), h('div', { className: 'l' }, l))),
@@ -801,6 +815,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       useEffect(() => { get('/models').then((r) => setList(r.list || [])) }, [])
       const key = (m) => m.provider + '::' + m.model
       const cur = draft.model.provider && draft.model.model ? draft.model.provider + '::' + draft.model.model : ''
+      const curModel = cur && list ? list.find((m) => key(m) === cur) : null
+      // reasoning === null 表示 DSH 明确说这个模型不支持思考强度（本地 Ollama 之类）
+      const noReasoning = Boolean(curModel && curModel.reasoning === null)
       const test = async (m) => {
         setPing({ ...ping, [key(m)]: '测速中…' })
         const r = await post('/model/ping', { provider: m.provider, model: m.model })
@@ -808,7 +825,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       }
       return h('div', { className: 'ab-grid' },
         h(Card, { title: '聊天用的模型', desc: '新建的 QQ 会话按这里的设置来；已有会话也可以在 DSH 里点开单独切换。聊天对速度很敏感，可以先点「测速」挑个快的。' },
-          h(Row, { label: '思考强度', hint: '聊天建议「低」，回得快' }, h(Seg, { value: draft.model.reasoningEffort || 'low', onChange: (v) => setDraft(setPath(draft, 'model.reasoningEffort', v)), options: [{ value: 'low', label: '低' }, { value: 'high', label: '高' }, { value: 'max', label: '最高' }] })),
+          h(Row, { label: '思考强度', hint: noReasoning ? '这个模型不支持思考强度，会自动忽略' : '聊天建议「低」，回得快' }, h(Seg, { value: draft.model.reasoningEffort || 'low', disabled: noReasoning, onChange: (v) => setDraft(setPath(draft, 'model.reasoningEffort', v)), options: [{ value: 'low', label: '低' }, { value: 'high', label: '高' }, { value: 'max', label: '最高' }] })),
           h(Row, { label: '模型' },
             h(Select, {
               value: cur, width: 280,
@@ -921,10 +938,18 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
 
     function StickerCell({ it, onChanged, toast }) {
       const [name, setName] = useState(it.name || '')
+      // 名字可能是别处改的（她在 QQ 里自己改、或者另一个窗口改的）：props 变了要跟着更新。
+      // 不更新的话刷新后面板还显示旧名字，而且输入框一失焦就会把旧名字提交回去，覆盖掉刚改好的。
+      useEffect(() => { setName(it.name || '') }, [it.name])
       return h('div', { className: 'ab-sticker' },
         h('img', { src: API + '/sticker/image?md5=' + it.md5, alt: it.name || '表情', loading: 'lazy' }),
         h('input', { className: 'nm', value: name, placeholder: '未命名', maxLength: 12, onChange: (e) => setName(e.target.value),
-          onBlur: async () => { if (name !== (it.name || '')) { await post('/sticker/rename', { md5: it.md5, name }); toast('改好了') } } }),
+          onBlur: async () => {
+            if (name === (it.name || '')) return
+            await post('/sticker/rename', { md5: it.md5, name })
+            toast('改好了')
+            onChanged()
+          } }),
         h('div', { className: 'tg' }, (it.tags || []).join(' · ')),
         h('button', { type: 'button', className: 'ab-btn sm danger x', title: '删除', onClick: async () => { if (!confirm('删掉这张表情？（QQ 收藏里也会删）')) return; await post('/sticker/delete', { md5: it.md5 }); onChanged() } }, '✕'),
       )
@@ -1587,16 +1612,18 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         m.panel ? h(ExtPanel, { m, settings, toast, reload }) : null)
     }
 
-    const BILI_KIND = { watch: '看了', comment: '评论', reply: '回复', share: '分享给你', error: '没成功' }
+    const BILI_KIND = { watch: '看了', comment: '评论', reply: '回复', share: '分享给你', shot: '发你截图', error: '没成功' }
 
     /** B 站：登录、定时刷、评论 / 回复、分享给主人，以及她刷过什么。 */
     function Bili({ draft, setDraft, toast }) {
       const f = useField(draft, setDraft)
       const [s, setS] = useState(null)
       const [busy, setBusy] = useState('')
+      const [shots, setShots] = useState(null)
       const load = () => get('/bili/state').then(setS)
-      useEffect(() => { load() }, [])
-      const act = (path, label) => async () => { setBusy(label); const r = await post(path); setBusy(''); toast(r.message, r.ok ? 'ok' : 'err'); load() }
+      const loadShots = () => get('/bili/shots').then((r) => setShots(r.items || []))
+      useEffect(() => { load(); loadShots() }, [])
+      const act = (path, label) => async () => { setBusy(label); const r = await post(path); setBusy(''); toast(r.message, r.ok ? 'ok' : 'err'); load(); loadShots() }
       const acct = s && s.account
       return h('div', { className: 'ab-grid' },
         h(Card, { title: '刷 B 站', right: f.sw('bili.enabled'), desc: '她会定时去 B 站刷几个视频：从她的兴趣、记忆里你喜欢的东西和下面的关键词里挑方向去搜，读简介、字幕和热评，再按自己的性格决定评不评论、要不要私聊分享给你、记住什么。看过的、评过的都记成她的经历，聊天时会自然提起。你在 QQ 里发 B 站链接或分享卡片，她也能点进去看完再聊。' },
@@ -1614,6 +1641,19 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Row, { label: '播放量门槛' }, f.num('bili.minViews', { min: 0 }), h('span', { className: 'ab-muted' }, '次以上')),
           h(Row, { label: '只看最近' }, f.num('bili.maxAgeDays', { min: 0 }), h('span', { className: 'ab-muted' }, '天内发的（0 = 不限）')),
         ),
+        h(Card, { title: '看画面（抽帧 + 视觉）', desc: '默认她只看文字：标题、简介、字幕、热评。打开后，她会用 ffmpeg 从视频里抽几帧交给视觉模型，知道画面里在拍什么 —— 没字幕的视频也能看懂个大概。抽到的画面会顺手存到本机，刷完可能甩一张给你，你在 QQ 里让她发截图也能随时挑。模型不支持图片、或者电脑上没装 ffmpeg 时，请保持关闭。' },
+          h(Row, { label: '让她看画面', hint: '需要视觉模型 + ffmpeg；关掉就退回只看文字' }, f.sw('bili.vision')),
+          h(Row, { label: '每个视频抽几帧' }, f.range('bili.visionFrames', 2, 12, 1, (v) => v + ' 帧')),
+          h(Row, { label: '刷完顺手发张截图', hint: '概率；跟发一张表情包一样默认 35%，0 = 从不。截图都存在本机，你让她发她也能挑' }, f.range('bili.shotChance', 0, 1, 0.05, (v) => Math.round(v * 100) + '%')),
+          h(Row, { label: '截图库最多存', hint: '超过就自动删最旧的；下面的截图库里也能一张张手动删' }, f.num('bili.shotLibrary', { min: 20, max: 2000 }), h('span', { className: 'ab-muted' }, '张')),
+          h(Row, { label: 'ffmpeg 路径', hint: '留空就自己在 PATH 里找；找不到就填绝对路径' }, f.text('bili.ffmpegPath', { placeholder: 'C:\\ffmpeg\\bin\\ffmpeg.exe' })),
+          s && s.vision ? h('div', { className: 'ab-small', style: { marginTop: 4, color: s.vision.ffmpeg ? 'var(--ab-ok)' : 'var(--ab-warn)' } }, (s.vision.ffmpeg ? '✓ 已找到 ffmpeg：' + s.vision.ffmpeg : '✗ 没找到 ffmpeg：抽帧会被跳过，装一个或者在上面填路径') + (s.shots ? '　·　手上存了 ' + s.shots.count + ' 张截图' : '')) : null,
+        ),
+        h(Card, { title: '截图库' + (shots ? '（' + shots.length + ' / ' + ((draft.bili && draft.bili.shotLibrary) || 300) + '）' : ''), right: h('div', { className: 'ab-flex' },
+          h(Btn, { small: true, kind: 'ghost', onClick: loadShots }, '刷新')) },
+          !shots ? h(Empty, { icon: '⏳', text: '加载中…' }) : shots.length === 0 ? h(Empty, { icon: '🎬', text: '还没有截图。打开上面的「让她看画面」刷一轮 B 站，就会开始截。' }) :
+            h('div', { className: 'ab-shots' }, shots.map((it) => h(ShotCell, { key: it.file, it, onChanged: () => { loadShots(); load() }, toast }))),
+        ),
         h(Card, { title: '评论、回复和分享', desc: '评论和回复要登录。试运行开着时只记日志不发。' },
           h(Row, { label: '自己发评论' }, f.sw('bili.comment'), h('span', { className: 'ab-muted' }, '每天最多'), f.num('bili.maxCommentsPerDay', { min: 0, max: 50 }), h('span', { className: 'ab-muted' }, '条')),
           h(Row, { label: '回别人回她的评论' }, f.sw('bili.reply'), h('span', { className: 'ab-muted' }, '每天最多'), f.num('bili.maxRepliesPerDay', { min: 0, max: 100 }), h('span', { className: 'ab-muted' }, '条')),
@@ -1630,6 +1670,64 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
               h('div', { className: 'meta' }, timeAgo(x.at), h('br'), BILI_KIND[x.kind] || x.kind),
               h('div', { className: 'body' }, x.bvid ? h('a', { href: 'https://www.bilibili.com/video/' + x.bvid, target: '_blank', rel: 'noreferrer' }, '《' + x.title + '》') : h('b', null, '《' + x.title + '》'), x.text ? h('div', { className: 'ab-muted' }, x.text) : null)))),
         ),
+      )
+    }
+
+    function ShotCell({ it, onChanged, toast }) {
+      const src = API + '/bili/shot/image?file=' + encodeURIComponent(it.file)
+      const cap = (it.title ? '《' + it.title + '》' : '截图') + (it.clock ? '　' + it.clock : '')
+      return h('div', { className: 'ab-shot' },
+        h('a', { href: src, target: '_blank', rel: 'noreferrer' }, h('img', { src, alt: cap, loading: 'lazy' })),
+        h('div', { className: 'cap', title: it.note || '' }, cap),
+        h('button', {
+          type: 'button',
+          className: 'ab-btn sm danger x',
+          title: '删除',
+          onClick: async () => {
+            if (!confirm('删掉这张截图？\n' + cap)) return
+            const r = await post('/bili/shot/delete', { file: it.file })
+            toast(r.message || '删掉了', r.ok ? 'ok' : 'err')
+            onChanged()
+          },
+        }, '✕'),
+      )
+    }
+
+    /** 面板里的调试对话：不经过 QQ、不写记忆，直接把她说的话显示出来。 */
+    function DebugChat({ toast }) {
+      const [msgs, setMsgs] = useState([])
+      const [text, setText] = useState('')
+      const [busy, setBusy] = useState(false)
+      const say = async () => {
+        const t = text.trim()
+        if (!t || busy) return
+        setMsgs((m) => [...m, { who: 'me', text: t }])
+        setText('')
+        setBusy(true)
+        try {
+          const r = await post('/debug/say', { text: t })
+          setMsgs((m) => [...m, { who: 'her', text: r.ok ? (r.text || '（她这次没说话）') : '✗ ' + (r.message || '出错了') }])
+        } catch (error) {
+          setMsgs((m) => [...m, { who: 'her', text: '✗ ' + error.message }])
+        } finally {
+          setBusy(false)
+        }
+      }
+      return h('div', null,
+        msgs.length ? h('div', { className: 'ab-list', style: { maxHeight: 340, overflow: 'auto', marginBottom: 8 } },
+          msgs.map((m, i) => h('div', { key: i, className: 'ab-li' },
+            h('div', { className: 'meta' }, m.who === 'me' ? '你' : '她'),
+            h('div', { className: 'body' }, m.text)))) : h(Empty, { icon: '🐳', text: '说点什么试试 —— 比如「在吗」「今天心情怎么样」' }),
+        h('div', { className: 'ab-flex', style: { marginTop: 6 } },
+          h('input', {
+            className: 'ab-input',
+            style: { flex: 1 },
+            value: text,
+            placeholder: '对她说…（回车发送）',
+            onChange: (e) => setText(e.target.value),
+            onKeyDown: (e) => { if (e.key === 'Enter') say() },
+          }),
+          h(Btn, { small: true, kind: 'primary', disabled: busy || !text.trim(), onClick: say }, busy ? '她在想…' : '发送')),
       )
     }
 
@@ -1802,6 +1900,14 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const quickToggle = async (path, v) => {
         await save(setPath(dirtyRef.current ? draft : clone(st.config), path, v))
       }
+      // 试运行 / 调试互斥：开一个就自动关另一个。
+      // 关掉「调试」退回「试运行」（而不是直接上线）—— 上线必须自己关掉「试运行」那个开关。
+      const toggleRun = async (which, v) => {
+        const base = clone(dirtyRef.current ? draft : st.config)
+        const debug = which === 'debug' ? Boolean(v) : false
+        const dryRun = which === 'debug' ? !v : Boolean(v)
+        await save(setPath(setPath(base, 'debug', debug), 'dryRun', dryRun))
+      }
       // Ctrl/⌘ + S 保存
       useEffect(() => {
         const onKey = (e) => {
@@ -1819,7 +1925,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       }
       const cfg = st.config
       const conn = st.onebot.state === 'connected'
-      const status = !cfg.enabled ? { cls: '', text: '休息中（总开关关着）' } : !conn ? { cls: 'err', text: 'QQ 没连上' } : cfg.dryRun ? { cls: 'warn', text: '在线 · 试运行' } : { cls: 'ok', text: '在线' }
+      const status = !cfg.enabled ? { cls: '', text: '休息中（总开关关着）' } : !conn ? { cls: 'err', text: 'QQ 没连上' } : cfg.debug ? { cls: 'warn', text: '在线 · 调试' } : cfg.dryRun ? { cls: 'warn', text: '在线 · 试运行' } : { cls: 'ok', text: '在线' }
       const persona = st.personas.find((p) => p.id === cfg.persona.current)
       const props = { st, draft, setDraft: setD, toast, reload, go, openWizard: () => setWizardOpen(true) }
       const showWizard = !cfg.setupDone || wizardOpen
@@ -1857,7 +1963,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                 h('span', { className: 'ab-pill' }, 'Aurabot v' + st.version))),
             h('div', { className: 'ab-hero-side' },
               h('div', { className: 'ab-switch-row' }, h('span', null, '总开关'), h(Switch, { on: cfg.enabled, onChange: (v) => quickToggle('enabled', v) })),
-              h('div', { className: 'ab-switch-row' }, h('span', { className: 'ab-muted' }, '试运行'), h(Switch, { on: cfg.dryRun, onChange: (v) => quickToggle('dryRun', v), title: '开着时只写日志，不真的发到 QQ' })))),
+              h('div', { className: 'ab-switch-row' }, h('span', { className: 'ab-muted' }, '试运行'), h(Switch, { on: cfg.dryRun, onChange: (v) => toggleRun('dryRun', v), title: '开着时只写日志，不真的发到 QQ（记忆照写）' })),
+              h('div', { className: 'ab-switch-row' }, h('span', { className: 'ab-muted' }, '调试'), h(Switch, { on: cfg.debug, onChange: (v) => toggleRun('debug', v), title: '调试：不真发，也不写任何记忆和聊天流水，只在日志里看。开它会自动关掉试运行' })))),
           showWizard ? h(Wizard, { st, draft, setDraft: setD, save, toast, reload, onClose: () => setWizardOpen(false) }) : null,
           showWizard ? null : h('div', { className: 'ab-tabs', role: 'tablist', ref: tabsRef }, tabs.map((t) => {
             const flag = t.flag === 'group' ? cfg.allow.groups.length > 0 : t.flag ? getPath(cfg, t.flag) : null

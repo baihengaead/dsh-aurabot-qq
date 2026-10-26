@@ -17,7 +17,7 @@ import { fetchImage, segmentBytes } from '../core/net.js'
 import { toMono16k } from '../voice/wav.js'
 import { mimeOf } from './inbound.js'
 import { redact } from '../core/redact.js'
-import { defaultModel } from '../core/llm.js'
+import { defaultModel, pickReasoningEffort } from '../core/llm.js'
 
 // QQ 会话的工作区目录，第一次收到消息时自动创建。老安装沿用 C:\Aurabot\qq-chats；新安装放在用户目录下（不用往 C 盘根目录写）
 const LEGACY_WORKSPACE = 'C:\\Aurabot\\qq-chats'
@@ -78,6 +78,11 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
 
   // ---------- 聊天流水（给空间日记、主动搭话、面板用） ----------
   function logChat(chatId, who, text, uid = '') {
+    // 调试模式：不写聊天流水，只进插件日志。流水是长期记忆的原料，写了就等于把调试对话记进记忆。
+    if (getConfig().debug) {
+      log.info(`[调试] ${who}${uid ? '（' + uid + '）' : ''} → ${chatId}：${String(text || '').slice(0, 300)}`)
+      return
+    }
     try {
       const d = new Date()
       const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -140,17 +145,20 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   async function createSession(chat, level) {
     const ws = await ensureWorkspace()
     const preset = presetFor(level)
+    const debug = getConfig().debug
+    // 调试会话和正式会话分开，标题也标出来，免得在侧栏里点错
+    const title = titleFor(chat) + (debug ? '（调试）' : '')
     const r = await controller().create({ workspaceId: ws.id, agentPreset: preset })
     const sid = String(r.sessionId)
     try {
-      await controller().rename({ sessionId: sid, title: titleFor(chat) })
+      await controller().rename({ sessionId: sid, title })
     } catch (error) {
       log.debug('改会话标题失败：', error.message)
     }
     const m = map()
-    m.chats[chat.chatId] = { sessionId: sid, preset, level, createdAt: Date.now(), title: titleFor(chat) }
+    m.chats[chat.chatId] = { sessionId: sid, preset, level, createdAt: Date.now(), title, mode: debug ? 'debug' : 'live' }
     saveMap(m)
-    log.info(`为 ${chat.chatId} 新建了 DSH 会话 ${sid.slice(-8)}（${preset}）`)
+    log.info(`为 ${chat.chatId} 新建了 DSH 会话 ${sid.slice(-8)}（${preset}${debug ? '，调试' : ''}）`)
     return sid
   }
 
@@ -169,7 +177,9 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     const level = chat.kind === 'system' ? 'social' : levelFor(cfg, chat)
     const preset = presetFor(level)
     const entry = map().chats[chat.chatId]
-    let sid = entry && entry.preset === preset && entry.level === level ? entry.sessionId : ''
+    // 调试和正式用不同的会话：不然切回正式时，调试期间那些对话还在上下文里，等于被她"记住"了
+    const mode = cfg.debug ? 'debug' : 'live'
+    let sid = entry && entry.preset === preset && entry.level === level && (entry.mode || 'live') === mode ? entry.sessionId : ''
     let agent = null
     if (sid) {
       try {
@@ -190,10 +200,11 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       agent = await resolveAgent(sid)
     }
     // 模型 / 思考强度和设置不一致就切过去（面板改了模型，下一条消息起生效）
-    const want = modelKey(chat)
+    const target = await resolveTarget(chat)
+    const want = keyOf(target)
     const m = map()
     if (want && m.chats[chat.chatId] && m.chats[chat.chatId].model !== want) {
-      if (applyModel(agent, chat)) {
+      if (applyModel(agent, target)) {
         m.chats[chat.chatId].model = want
         saveMap(m)
         log.info(`${chat.chatId} 的模型切到 ${want}`)
@@ -202,6 +213,51 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     sessionToChat.set(sessionKey(sid), chat.chatId)
     mount(agent, chat, level)
     return { agent, sessionId: sid, level }
+  }
+
+  /**
+   * 调试会话刚建好时先让她说一句。
+   * DSH 的侧栏会把「一条消息都没有、焦点也不在」的会话直接藏起来 —— 空会话等于不存在，
+   * 所以这里要留下一条真实对话，会话才会出现在侧栏里。
+   * 不设 st.system，让它走正常的一轮：调试模式下这一轮只会写日志，不会真发。
+   */
+  async function seedDebugSession(chat) {
+    const { agent } = await agentFor(chat)
+    const text = '（调试模式刚开始，这条只有我看得到。轻轻跟我打个招呼，一句话就好。）'
+    const admitted = await admit(agent, [{ type: 'text', text }])
+    await agent.followup({ id: randomUUID(), role: 'user', content: admitted, source: { kind: SOURCE_KIND } })
+  }
+
+  /**
+   * 调试模式：把主人私聊的调试会话建出来，并让它有一条消息（否则侧栏看不到）。
+   */
+  async function ensureDebugSession() {
+    const cfg = getConfig()
+    if (!cfg.debug) return { ok: false, message: '没开调试模式' }
+    if (!cfg.ownerQQ) return { ok: false, message: '还没填主人 QQ' }
+    const chat = { kind: 'private', chatId: `private:${cfg.ownerQQ}`, userId: String(cfg.ownerQQ), groupId: '', nickname: cfg.ownerName || '主人' }
+    const before = map().chats[chat.chatId]
+    const prevId = before && (before.mode || 'live') === 'debug' ? before.sessionId : ''
+    const r = await agentFor(chat)
+    // 以「实际有没有换会话」为准：映射里记着但会话已经找不回来时，上面会新建一条
+    const created = r.sessionId !== prevId
+    if (created) log.info(`调试会话建好了：${r.sessionId.slice(-8)}（在左侧栏「Aurabot · QQ」里打开就能直接跟她说话）`)
+    // 空会话在侧栏是看不见的：第一次建出来、或者之前那条还没开过场，就让她先说一句
+    const needSeed = created || !before || !before.seeded
+    if (needSeed) {
+      seedDebugSession(chat).then(() => {
+        const m = map()
+        if (m.chats[chat.chatId]) { m.chats[chat.chatId].seeded = true; saveMap(m) }
+      }).catch((error) => log.debug('调试会话开场白失败：', error.message))
+    }
+    return {
+      ok: true,
+      sessionId: r.sessionId,
+      created,
+      message: created
+        ? '建好了一条调试会话，已经让她先打了个招呼 —— 左侧栏「Aurabot · QQ」里刷新一下就能看到'
+        : '调试会话已经在了：左侧栏没看到就刷新一下 DSH 页面（空会话会被侧栏藏起来，现在有消息了应该能看到）',
+    }
   }
 
   /** 这个聊天要用的模型：面板里选的（或 DSH 默认），扩展模块可以按聊天改。 */
@@ -217,18 +273,25 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     }
     return sel
   }
-  function modelKey(chat) {
+  /**
+   * 想要的思考强度要先按模型能力收敛：没有推理元数据的模型（本地 Ollama、部分手写 provider）
+   * 只要收到 reasoningEffort 就会被 DSH 整轮拒掉（UNSUPPORTED_REASONING_EFFORT），
+   * 等于这个模型直接没法用。不支持就不传这个参数，让 DSH 用模型自己的默认。
+   */
+  async function resolveTarget(chat) {
     const t = targetModel(chat)
-    return t ? `${t.provider}::${t.model}::${t.reasoningEffort || ''}` : ''
+    if (!t) return null
+    const effort = await pickReasoningEffort(dsh, t.provider, t.model, t.reasoningEffort)
+    return { provider: t.provider, model: t.model, ...(effort ? { reasoningEffort: effort } : {}) }
   }
+  const keyOf = (t) => (t ? `${t.provider}::${t.model}::${t.reasoningEffort || ''}` : '')
 
   /** 让聊天会话用面板里选的模型和思考强度；只改这个会话，不改 DSH 的默认模型。 */
-  function applyModel(agent, chat) {
+  function applyModel(agent, target) {
     try {
-      const t = targetModel(chat)
-      if (!t) return false
-      const sel = { provider: t.provider, model: t.model }
-      if (t.reasoningEffort) sel.reasoningEffort = t.reasoningEffort
+      if (!target) return false
+      const sel = { provider: target.provider, model: target.model }
+      if (target.reasoningEffort) sel.reasoningEffort = target.reasoningEffort
       // 活着的会话只认会话控制器内存里的选择：用它的 selectForNextRequest（selectModel 也是调它，
       // 但 selectModel 还会顺手改掉 DSH 的全局默认模型，我们不要）。拿不到就只写持久事件（重启恢复时生效）。
       const agents = controller().agents
@@ -309,6 +372,11 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     if (cap) {
       cap.push({ chatId, note, message })
       return { message_id: 'sim-' + cap.length }
+    }
+    // 调试模式什么都不发（连 force 的命令回复也不发），只在日志里能看到
+    if (cfg.debug) {
+      log.info(`调试（没真发）→ ${chatId}：${note}`)
+      return null
     }
     if (force) {}
     else if (!cfg.enabled) {
@@ -526,6 +594,17 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
         return
       }
       if (!text) return release(chatId)
+      // 只让「这个聊天当前在用的那条会话」把回复发出去。
+      // 判断两件事：① 它是不是 sessions.json 里当前记的那条；② 它的 mode 和现在的模式是否一致。
+      // 第二条很关键：刚切了调试/正式、还没收到新消息时，映射还停在旧会话上 ——
+      // 那时候在旧会话里打字，也不该把回复发到 QQ。
+      const cur = map().chats[chatId]
+      const mode = getConfig().debug ? 'debug' : 'live'
+      const stale = !cur || sessionKey(cur.sessionId) !== key || (cur.mode || 'live') !== mode
+      if (stale) {
+        log.info(`${chatId} 的旧会话（${key.slice(0, 8)}…）这一轮不发：它不是当前模式在用的会话`)
+        return release(chatId)
+      }
       // 发完再放开：发送期间来的消息也攒到下一段
       deliver(chatId, text, { wantVoice, userText: st.lastText || '' }).catch((error) => log.warn('发送出错：', error.message)).finally(() => release(chatId))
     }
@@ -1004,8 +1083,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   }
 
   /** 后台任务（写日记、主动搭话的草稿）：在专用会话里跑一轮，拿到正文但不自动转发。 */
-  async function runSystemTurn(name, title, prompt, { timeoutMs = 180000 } = {}) {
-    const chat = { chatId: `system:${name}`, kind: 'system', title }
+  async function runSystemTurn(name, title, prompt, { timeoutMs = 180000 } = {}) {    const chat = { chatId: `system:${name}`, kind: 'system', title }
     const { agent, sessionId } = await agentFor(chat)
     const key = sessionKey(sessionId)
     const st = turnState.get(key) || { lastTurn: -1, text: '', senders: new Set() }
@@ -1022,8 +1100,46 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     return result
   }
 
-  /** 这一轮里说话的人是不是全是主人（群管等敏感工具用）。 */
-  /** 这一轮里主人说过话（群里常有别人插话，不要求每条都是主人）。 */
+  /**
+   * 面板里的调试对话：把一句话交给「主人私聊」那条链路，直接拿回她的正文。
+   * 不经过 QQ；调试模式下各个写入入口本来就是关的，所以也不会进记忆。
+   */
+  async function debugSay(text, { timeoutMs = 180000 } = {}) {
+    const cfg = getConfig()
+    if (!cfg.debug) return { ok: false, message: '没开调试模式' }
+    if (!cfg.ownerQQ) return { ok: false, message: '还没填主人 QQ' }
+    const say = String(text || '').trim().slice(0, 2000)
+    if (!say) return { ok: false, message: '说点什么吧' }
+    const chat = { kind: 'private', chatId: `private:${cfg.ownerQQ}`, userId: String(cfg.ownerQQ), groupId: '', nickname: cfg.ownerName || '主人' }
+    const { agent, sessionId } = await agentFor(chat)
+    const key = sessionKey(sessionId)
+    const st = turnState.get(key) || { lastTurn: -1, text: '', senders: new Set() }
+    turnState.set(key, st)
+    st.lastText = say
+    st.senders = new Set([String(cfg.ownerQQ)])
+    st.speakers = [String(cfg.ownerQQ)]
+    log.info(`[调试] 面板 → ${chat.chatId}：${say.slice(0, 300)}`)
+    let timer
+    const result = new Promise((resolve, reject) => {
+      st.system = { resolve, reject }
+      timer = setTimeout(() => {
+        st.system = null
+        reject(new Error(`等太久了（超过 ${Math.round(timeoutMs / 1000)} 秒）`))
+      }, timeoutMs)
+    }).finally(() => clearTimeout(timer))
+    try {
+      const admitted = await admit(agent, [{ type: 'text', text: say }])
+      await agent.followup({ id: randomUUID(), role: 'user', content: admitted, source: { kind: SOURCE_KIND } })
+      const reply = await result
+      log.info(`[调试] bot → 面板：${String(reply || '（她没说话）').slice(0, 300)}`)
+      return { ok: true, text: reply, sessionId }
+    } catch (error) {
+      st.system = null
+      return { ok: false, message: error.message }
+    }
+  }
+
+  /** 这一轮里说话的人是不是全是主人（群管等敏感工具用）。 */  /** 这一轮里主人说过话（群里常有别人插话，不要求每条都是主人）。 */
   function turnHasOwner(sessionId) {
     const st = turnState.get(sessionKey(sessionId))
     return Boolean(st && [...st.senders].some((u) => isOwner(getConfig(), u)))
@@ -1119,6 +1235,8 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     leaveTopic: (gid) => groupEngaged.delete(String(gid)),
     chatOfSession,
     resetSessions,
+    ensureDebugSession,
+    debugSay,
     lastTextOf: (sessionId) => turnState.get(sessionKey(sessionId))?.lastText || '',
     prevTextOf: (sessionId) => turnState.get(sessionKey(sessionId))?.prevText || '',
     speakersOf: (sessionId) => turnState.get(sessionKey(sessionId))?.speakers || [],

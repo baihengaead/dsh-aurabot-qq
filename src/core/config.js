@@ -6,7 +6,8 @@ import { LEVELS } from '../chat/access.js'
 
 export const DEFAULTS = {
   enabled: false, // 总开关：关着一句都不发
-  dryRun: true, // 试运行：只记日志不真发
+  dryRun: true, // 试运行：只记日志不真发（记忆照写）
+  debug: false, // 调试：不真发 + 什么都不写进记忆/流水，只在日志里看（和试运行互斥）
   setupDone: false, // 首次使用向导走完了没有
   botQQ: '', // 机器人 QQ 号（向导里填）
   ownerQQ: '', // 主人 QQ 号（向导里填）
@@ -61,6 +62,7 @@ export const DEFAULTS = {
     fromPrivate: true,
     maxPerHour: 20,
     maxLibrary: 300, // 表情库最多存多少张（QQ 收藏表情有上限），超了就清掉最少用的
+    maxSide: 520, // 偷表情时最长边上限：QQ 里的大表情常超过 520，按需要调大
     caption: true, // 用视觉模型起备注
   },
   diary: {
@@ -93,6 +95,11 @@ export const DEFAULTS = {
     maxRepliesPerDay: 6,
     shareToOwner: true, // 看到好玩的私聊分享给主人
     like: false, // 顺手点赞
+    vision: false, // 抽帧 + 视觉：让她真的看到画面。模型不支持图片时务必关掉
+    visionFrames: 6, // 一个视频抽几帧给她看
+    ffmpegPath: '', // 留空自动找（PATH / 常见安装位置）
+    shotChance: 0.35, // 刷完顺手发一张截图的概率（跟发一张表情包一个量级，0 = 从不）
+    shotLibrary: 300, // 截图库最多存多少张，超了自动删最旧的
   },
   qzoneSocial: {
     enabled: true,
@@ -171,6 +178,10 @@ export function normalize(raw) {
   const c = deepMerge(DEFAULTS, raw)
   c.enabled = bool(c.enabled, false)
   c.dryRun = bool(c.dryRun, true)
+  c.debug = bool(c.debug, false)
+  // 调试比试运行更严：它本身就包含「不真发」，所以内部一律当成 dryRun（下面所有 dryRun 判断都自动生效）。
+  // 面板上两个开关互斥，「试运行」显示的是 dryRun && !debug。
+  if (c.debug) c.dryRun = true
   c.botQQ = qq(c.botQQ)
   c.ownerQQ = qq(c.ownerQQ)
   c.setupDone = bool(c.setupDone, false)
@@ -191,6 +202,7 @@ export function normalize(raw) {
   c.stickers.autoChance = num(c.stickers.autoChance, 0.35, 0, 1)
   c.stickers.maxPerHour = num(c.stickers.maxPerHour, 20, 0, 200)
   c.stickers.maxLibrary = num(c.stickers.maxLibrary, 300, 20, 2000)
+  c.stickers.maxSide = num(c.stickers.maxSide, 520, 80, 4096)
   c.diary.timesPerDay = num(c.diary.timesPerDay, 2, 0, 6)
   c.diary.windowStart = hhmm(c.diary.windowStart, '10:00')
   c.diary.windowEnd = hhmm(c.diary.windowEnd, '23:30')
@@ -217,12 +229,15 @@ export function normalize(raw) {
   for (const k of ['tts', 'image', 'song', 'asr']) c.local[k] = bool(c.local[k], false)
   const b = c.bili
   Object.assign(b, splitBiliCookie(b))
-  for (const k of ['enabled', 'autoBrowse', 'comment', 'reply', 'shareToOwner', 'like']) b[k] = bool(b[k], DEFAULTS.bili[k])
+  for (const k of ['enabled', 'autoBrowse', 'comment', 'reply', 'shareToOwner', 'like', 'vision']) b[k] = bool(b[k], DEFAULTS.bili[k])
   b.intervalHours = num(b.intervalHours, 4, 1, 48)
   b.maxRunsPerDay = num(b.maxRunsPerDay, 3, 0, 24)
   b.perRun = num(b.perRun, 3, 1, 8)
   b.minViews = num(b.minViews, 5000, 0, 1e8)
   b.maxAgeDays = num(b.maxAgeDays, 60, 0, 3650)
+  b.visionFrames = num(b.visionFrames, 6, 2, 12)
+  b.shotChance = num(b.shotChance, 0.35, 0, 1)
+  b.shotLibrary = num(b.shotLibrary, 300, 20, 2000)
   b.maxCommentsPerDay = num(b.maxCommentsPerDay, 3, 0, 50)
   b.maxRepliesPerDay = num(b.maxRepliesPerDay, 6, 0, 100)
   b.keywords = (Array.isArray(b.keywords) ? b.keywords : String(b.keywords || '').split(/[\n,，]+/)).map((x) => String(x).trim()).filter(Boolean).slice(0, 30)
@@ -352,6 +367,8 @@ export function saveConfig(cfg) {
 /** 给面板看的版本：密码 / token 不回传原文，只告诉有没有填。 */
 export function publicConfig(cfg) {
   const c = structuredClone(cfg)
+  // 面板上的「试运行」只表示「试运行但不调试」：调试开着时它显示为关，两个开关天然互斥
+  c.dryRun = Boolean(c.dryRun && !c.debug)
   for (const [g, k] of HINTED) c[g][`${k}Hint`] = c[g][k] ? '…' + String(c[g][k]).slice(-4) : ''
   for (const path of allSecrets()) {
     const p = parentOf(c, path, false)
