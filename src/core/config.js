@@ -300,7 +300,7 @@ export function normalize(raw) {
   const pct = /^([+-]?\d{1,3})\s*%$/.exec(String(c.voice.rate || '').trim())
   c.voice.rate = signed(pct ? Math.max(-50, Math.min(50, Number(pct[1]))) : 0, '%')
   const hz = /^([+-]?\d{1,3})\s*Hz$/i.exec(String(c.voice.pitch || '').trim())
-  c.voice.pitch = signed(hz ? Math.max(-50, Math.min(50, Number(hz[1]))) : 0, 'Hz')
+  c.voice.pitch = signed(hz ? Math.max(-80, Math.min(80, Number(hz[1]))) : 0, 'Hz')
   c.imageGen.enabled = bool(c.imageGen.enabled, false)
   c.imageGen.ownerOnly = bool(c.imageGen.ownerOnly, true)
   c.imageGen.seeOwn = bool(c.imageGen.seeOwn, true)
