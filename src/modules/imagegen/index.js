@@ -35,7 +35,17 @@ export default {
   setup(api) {
     const { hub, local } = api.core
     const memory = api.lazy('memory')
-    const gen = createImageGen({ getConfig: api.config, log: api.log, local, dsh: api.dsh })
+    const gen = createImageGen({
+      getConfig: api.config,
+      log: api.log,
+      local,
+      dsh: api.dsh,
+      // 让她在自己的会话里看这张图：DSH 的 agent 图片入口是通的，插件直接调 llm 会被拒
+      lookTurn: (buf, prompt) => hub.runSystemTurn('look', 'QQ · 看图', `这是你刚画出来的图。用第一人称、两三句话说清画面：主体、风格、颜色、细节，语气自然，别说「这张图片展示了」。画图时用的提示词是：${String(prompt || '').slice(0, 300)}`, {
+        images: [{ data: buf.toString('base64'), mediaType: mimeOf(buf), name: 'aurabot-drawing' }],
+        timeoutMs: 90000,
+      }),
+    })
     api.tool(({ chat, sessionId }) => (gen.enabled() && chat.kind !== 'system' ? defineTool({
       name: 'qq_draw_image',
       description: '画一张图并发到当前 QQ 聊天里。prompt 用中文或英文详细描述画面（主体、动作、场景、风格）。画好会直接发出去，同时把你自己看到的画面告诉你；回复里简单说一两句就行。',

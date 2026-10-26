@@ -1141,7 +1141,8 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   }
 
   /** 后台任务（写日记、主动搭话的草稿）：在专用会话里跑一轮，拿到正文但不自动转发。 */
-  async function runSystemTurn(name, title, prompt, { timeoutMs = 180000 } = {}) {    const chat = { chatId: `system:${name}`, kind: 'system', title }
+  async function runSystemTurn(name, title, prompt, { timeoutMs = 180000, images = [] } = {}) {
+    const chat = { chatId: `system:${name}`, kind: 'system', title }
     const { agent, sessionId } = await agentFor(chat)
     const key = sessionKey(sessionId)
     const st = turnState.get(key) || { lastTurn: -1, text: '', senders: new Set() }
@@ -1154,7 +1155,11 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
         reject(new Error('等太久了'))
       }, timeoutMs)
     }).finally(() => clearTimeout(timer))
-    await agent.followup({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: prompt }], source: { kind: SOURCE_KIND } })
+    // 带图的任务（比如「看看自己画的图」）：跟聊天里收图走同一套附件登记，才真的能被模型看见
+    let content = [{ type: 'text', text: prompt }]
+    for (const img of images || []) content.push({ type: 'image', data: img.data, mediaType: img.mediaType, name: img.name || 'aurabot-image' })
+    if (content.length > 1) content = await admit(agent, content)
+    await agent.followup({ id: randomUUID(), role: 'user', content, source: { kind: SOURCE_KIND } })
     return result
   }
 

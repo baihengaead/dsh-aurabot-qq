@@ -95,7 +95,7 @@ async function valueToBuffer (v) {
   throw new Error('生图接口返回的既不是图片地址也不是图片')
 }
 
-export function createImageGen({ getConfig, log, local, dsh }) {
+export function createImageGen({ getConfig, log, local, dsh, lookTurn }) {
   async function generate(prompt) {
     const c = getConfig().imageGen
     // 本地接口接管：用用户自己电脑上的画图服务
@@ -173,9 +173,25 @@ export function createImageGen({ getConfig, log, local, dsh }) {
    */
   async function look (buf, prompt) {
     const c = getConfig().imageGen
-    if (!dsh || c.seeOwn === false) return ''
+    if (c.seeOwn === false) return ''
     // 模型明确看不了图就别浪费一次调用
-    if ((await canSeeImages(dsh, getConfig())) === false) return ''
+    if (dsh && (await canSeeImages(dsh, getConfig())) === false) return ''
+    // 优先走她自己的会话（agent 那条路的图片入口是通的）；askModel 那条 DSH 会拒图
+    if (typeof lookTurn === 'function') {
+      try {
+        const t = String(await lookTurn(buf, prompt) || '').trim()
+        if (t) {
+          log.info(`画完自己看了一眼：${t.slice(0, 60)}`)
+          return t
+        }
+        log.warn('画完想看自己画的图，但模型没返回文字')
+        return ''
+      } catch (error) {
+        log.warn('画完看图失败：', error.message)
+        return ''
+      }
+    }
+    if (!dsh) return ''
     try {
       const text = await askModel(dsh, {
         cfg: getConfig(),
