@@ -293,6 +293,11 @@ export function normalize(raw) {
   if (!['auto', 'edge', 'windows', 'cosyvoice', 'gptsovits', 'http'].includes(c.voice.engine)) c.voice.engine = 'auto'
   c.voice.cosyvoice.sampleRate = num(c.voice.cosyvoice.sampleRate, 22050, 8000, 48000)
   if (!['sft', 'instruct'].includes(c.voice.cosyvoice.mode)) c.voice.cosyvoice.mode = 'sft'
+  // edge-tts 的语速 / 音调：只认 ±N% 和 ±NHz，写着玩的回落默认值，超范围的夹回来
+  const pct = /^([+-]?\d{1,3})\s*%$/.exec(String(c.voice.rate || '').trim())
+  c.voice.rate = pct ? (Number(pct[1]) > 0 ? '+' : '') + Math.max(-50, Math.min(50, Number(pct[1]))) + '%' : '+0%'
+  const hz = /^([+-]?\d{1,3})\s*Hz$/i.exec(String(c.voice.pitch || '').trim())
+  c.voice.pitch = hz ? (Number(hz[1]) > 0 ? '+' : '') + Math.max(-50, Math.min(50, Number(hz[1]))) + 'Hz' : '+0Hz'
   c.imageGen.enabled = bool(c.imageGen.enabled, false)
   c.imageGen.ownerOnly = bool(c.imageGen.ownerOnly, true)
   c.imageGen.seeOwn = bool(c.imageGen.seeOwn, true)

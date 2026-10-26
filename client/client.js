@@ -940,6 +940,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
               { value: 'zh-CN-liaoning-XiaobeiNeural', label: '晓北', desc: '东北女声', group: '方言' }, { value: 'zh-CN-shaanxi-XiaoniNeural', label: '晓妮', desc: '陕西女声', group: '方言' },
               { value: 'zh-TW-HsiaoChenNeural', label: '曉臻', desc: '台湾女声', group: '方言' }], { width: 220 })),
             h(Row, { key: 'r', label: '语速' }, f.select('voice.rate', [{ value: '-20%', label: '慢一点' }, { value: '-10%', label: '稍慢' }, { value: '+0%', label: '正常' }, { value: '+10%', label: '稍快' }, { value: '+20%', label: '快一点' }], { width: 140 })),
+            h(Row, { key: 'p', label: '音调', hint: '低一点更沉、高一点更活泼；只对 edge-tts 有效' }, f.select('voice.pitch', [{ value: '-20Hz', label: '低沉' }, { value: '-10Hz', label: '稍低' }, { value: '+0Hz', label: '正常' }, { value: '+10Hz', label: '稍高' }, { value: '+20Hz', label: '偏高' }], { width: 140 })),
           ] : null,
           draft.voice.engine === 'cosyvoice' ? [
             h(Row, { key: 'u', label: '服务地址', hint: 'CosyVoice 自带 runtime/python/fastapi/server.py' }, f.text('voice.cosyvoice.url', { size: 'wide', placeholder: 'http://127.0.0.1:50000' })),

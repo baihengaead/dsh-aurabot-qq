@@ -185,3 +185,20 @@ test('模型判心情：解析结果，没把握的不算，开了就不再按�
     process.env.AURABOT_DATA_DIR = prev
   }
 })
+
+test('语音：语速 / 音调只认 ±N% 和 ±NHz，写着玩的和超范围的都回落/夹回来', async () => {
+  const { normalize } = await import('../src/core/config.js')
+  const v = (voice) => normalize({ voice }).voice
+  // 音调（edge-tts 的 --pitch）
+  assert.equal(v({ pitch: '+20Hz' }).pitch, '+20Hz')
+  assert.equal(v({ pitch: '20Hz' }).pitch, '+20Hz', '没写正负号也当正')
+  assert.equal(v({ pitch: '-10hz' }).pitch, '-10Hz', '大小写不敏感')
+  assert.equal(v({ pitch: '999Hz' }).pitch, '+50Hz', '超范围夹到 ±50Hz')
+  assert.equal(v({ pitch: '大声点' }).pitch, '+0Hz', '乱写的回落默认')
+  assert.equal(v({ pitch: '' }).pitch, '+0Hz')
+  // 语速
+  assert.equal(v({ rate: '+10%' }).rate, '+10%')
+  assert.equal(v({ rate: '-5%' }).rate, '-5%')
+  assert.equal(v({ rate: '999%' }).rate, '+50%')
+  assert.equal(v({ rate: '快一点' }).rate, '+0%')
+})
