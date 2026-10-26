@@ -91,27 +91,53 @@ export function apply(ctx) {
   // 连上后先核对登录的是不是机器人号，核对通过前不处理任何消息；不是就断开，不再自动重连
   let loginOk = false
   let wrongAccount = ''
+  // 核对期间收到的事件先攒着：核对通过就补处理，核对失败就丢掉。
+  // 直接丢弃的话，刚连上那几百毫秒里主人发的消息就没了（登录核对要等一次 get_login_info 往返）。
+  let verifying = false
+  let pendingEvents = []
   let hub = null
   async function checkLogin() {
-    let uin = ''
+    verifying = true
+    pendingEvents = []
     try {
-      const info = await onebot.call('get_login_info', {}, { timeoutMs: 10000 })
-      uin = String(info?.user_id ?? '')
-    } catch (error) {
-      logger.child('onebot').warn('核对登录的 QQ 号失败：', error.message)
+      let uin = ''
+      try {
+        const info = await onebot.call('get_login_info', {}, { timeoutMs: 10000 })
+        uin = String(info?.user_id ?? '')
+      } catch (error) {
+        logger.child('onebot').warn('核对登录的 QQ 号失败：', error.message)
+      }
+      if (onebotState !== 'connected') return
+      if (!uin) {
+        // 核对不了就别用，断开后由看门狗重试
+        onebot.stop()
+        return
+      }
+      if (await snowluma.confirmLogin(uin)) {
+        loginOk = true
+        wrongAccount = ''
+        // 把核对期间攒下的补上（按到达顺序）
+        const queued = pendingEvents
+        pendingEvents = []
+        for (const ev of queued) handleEvent(ev)
+      } else {
+        wrongAccount = uin
+        pendingEvents = []
+        onebot.stop()
+      }
+    } finally {
+      verifying = false
     }
-    if (onebotState !== 'connected') return
-    if (!uin) {
-      // 核对不了就别用，断开后由看门狗重试
-      onebot.stop()
-      return
-    }
-    if (await snowluma.confirmLogin(uin)) {
-      loginOk = true
-      wrongAccount = ''
-    } else {
-      wrongAccount = uin
-      onebot.stop()
+  }
+  /** 核对通过后的事件都在这里处理（onEvent 直接调，核对期间攒下的也会补到这里）。 */
+  function handleEvent(ev) {
+    if (!hub) return
+    // 模块能看到所有原始事件（加群、撤回、好友申请……），只看不拦
+    mods?.emit('onebot', ev)
+    if (ev.post_type === 'message' || ev.post_type === 'message_sent') {
+      if (ev.post_type === 'message') hub.onMessage(ev).catch((error) => log.error('处理消息出错：', error.message))
+    } else if (ev.post_type === 'notice' && ev.notice_type === 'notify' && ev.sub_type === 'poke') {
+      hub.onPoke(ev).catch((error) => log.error('处理戳一戳出错：', error.message))
     }
   }
   const onebot = createOneBotClient({
@@ -119,21 +145,21 @@ export function apply(ctx) {
     log: logger.child('onebot'),
     onState: (s, d) => {
       onebotState = s
-      if (s !== 'connected') loginOk = false
+      if (s !== 'connected') { loginOk = false; pendingEvents = [] }
       else checkLogin().catch((error) => log.warn('核对登录号出错：', error.message))
       logger.child('onebot').info(`QQ 网关：${s}${d ? '（' + d + '）' : ''}`)
       mods?.emit('onebot/state', s)
     },
     onEvent: (ev) => {
-      // 还没核对是机器人号：什么都不处理
-      if (!loginOk) return
-      // 模块能看到所有原始事件（加群、撤回、好友申请……），只看不拦
-      mods?.emit('onebot', ev)
-      if (ev.post_type === 'message' || ev.post_type === 'message_sent') {
-        if (ev.post_type === 'message') hub.onMessage(ev).catch((error) => log.error('处理消息出错：', error.message))
-      } else if (ev.post_type === 'notice' && ev.notice_type === 'notify' && ev.sub_type === 'poke') {
-        hub.onPoke(ev).catch((error) => log.error('处理戳一戳出错：', error.message))
+      // 还没核对是机器人号：核对期间先攒着，核对通过后补处理
+      if (!loginOk) {
+        if (verifying) {
+          pendingEvents.push(ev)
+          if (pendingEvents.length > 200) pendingEvents.shift()
+        }
+        return
       }
+      handleEvent(ev)
     },
   })
   const groupRoles = createGroupRoles({ onebot, getConfig, log: logger.child('chat') })
