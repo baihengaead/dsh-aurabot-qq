@@ -247,6 +247,15 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
         log.info(`${chat.chatId} 的模型切到 ${want}`)
       }
     }
+    // 把「这一轮实际用的会话」写回映射。
+    // 只靠 createSession 写的话，复用旧会话时映射会一直停在上一条（比如刚切回正式，
+    // 映射里还是调试那条），投递守卫就把它当成"旧会话"把整条回复丢掉。
+    const sync = map()
+    const curEntry = sync.chats[chat.chatId] || {}
+    if (curEntry.sessionId !== sid || (curEntry.mode || 'live') !== mode) {
+      sync.chats[chat.chatId] = { ...curEntry, sessionId: sid, mode }
+      saveMap(sync)
+    }
     sessionToChat.set(sessionKey(sid), chat.chatId)
     mount(agent, chat, level)
     return { agent, sessionId: sid, level }
