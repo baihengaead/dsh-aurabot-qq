@@ -15,7 +15,17 @@ export default {
   files: ['features/stickers.js'],
   setup(api) {
     const { hub, onebot, http } = api.core
-    const store = createStickerStore({ dsh: api.dsh, getConfig: api.config, onebot, log: api.log })
+    const store = createStickerStore({
+      dsh: api.dsh,
+      getConfig: api.config,
+      onebot,
+      log: api.log,
+      // 看图起名也走她自己的会话（插件直接调 llm 传图会被 DSH 拒）
+      lookTurn: (buf, mime, prompt) => hub.runSystemTurn('sticker-look', 'QQ · 认表情', prompt, {
+        images: [{ data: buf.toString('base64'), mediaType: mime, name: 'aurabot-sticker' }],
+        timeoutMs: 60000,
+      }),
+    })
 
     api.tool(({ chat, level, sessionId }) => {
       if (chat.kind === 'system') return []
