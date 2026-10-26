@@ -142,6 +142,9 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     return chat.userId === getConfig().ownerQQ ? `QQ · ${owner}私聊` : `QQ 私聊 · ${chat.nickname || chat.userId}`
   }
 
+  /** 一个聊天记着的所有会话（正式 + 调试，去重）。 */
+  const sessionsOf = (e) => [...new Set([e.sessionId, ...Object.values(e.sessions || {})].filter(Boolean))]
+
   async function createSession(chat, level) {
     const ws = await ensureWorkspace()
     const preset = presetFor(level)
@@ -156,7 +159,17 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       log.debug('改会话标题失败：', error.message)
     }
     const m = map()
-    m.chats[chat.chatId] = { sessionId: sid, preset, level, createdAt: Date.now(), title, mode: debug ? 'debug' : 'live' }
+    const prev = m.chats[chat.chatId] || {}
+    const mode = debug ? 'debug' : 'live'
+    // 每种模式各记一条：切回调试/正式时能接上原来那条。档位（preset/level）变了就都作废。
+    const sessions = prev.preset === preset && prev.level === level ? { ...(prev.sessions || {}) } : {}
+    // 老数据没有 sessions 字段：把当前正在用的那条按其 mode 补进去，别在第一次切换时丢掉
+    if (prev.sessionId && prev.preset === preset && prev.level === level) {
+      const prevMode = prev.mode || 'live'
+      if (!sessions[prevMode]) sessions[prevMode] = prev.sessionId
+    }
+    sessions[mode] = sid
+    m.chats[chat.chatId] = { ...prev, sessionId: sid, mode, sessions, preset, level, createdAt: Date.now(), title }
     saveMap(m)
     log.info(`为 ${chat.chatId} 新建了 DSH 会话 ${sid.slice(-8)}（${preset}${debug ? '，调试' : ''}）`)
     return sid
@@ -177,9 +190,12 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     const level = chat.kind === 'system' ? 'social' : levelFor(cfg, chat)
     const preset = presetFor(level)
     const entry = map().chats[chat.chatId]
-    // 调试和正式用不同的会话：不然切回正式时，调试期间那些对话还在上下文里，等于被她"记住"了
+    // 调试和正式用不同的会话：不然切回正式时，调试期间那些对话还在上下文里，等于被她"记住"了。
+    // 每种模式各记一条（entry.sessions），切回来时接上原来那条；档位变了就整体作废。
     const mode = cfg.debug ? 'debug' : 'live'
-    let sid = entry && entry.preset === preset && entry.level === level && (entry.mode || 'live') === mode ? entry.sessionId : ''
+    const sameLevel = Boolean(entry && entry.preset === preset && entry.level === level)
+    const remembered = sameLevel ? ((entry.sessions && entry.sessions[mode]) || (entry.mode === mode ? entry.sessionId : '')) : ''
+    let sid = remembered || ''
     let agent = null
     if (sid) {
       try {
@@ -237,7 +253,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     if (!cfg.ownerQQ) return { ok: false, message: '还没填主人 QQ' }
     const chat = { kind: 'private', chatId: `private:${cfg.ownerQQ}`, userId: String(cfg.ownerQQ), groupId: '', nickname: cfg.ownerName || '主人' }
     const before = map().chats[chat.chatId]
-    const prevId = before && (before.mode || 'live') === 'debug' ? before.sessionId : ''
+    const prevId = before ? ((before.sessions && before.sessions.debug) || (before.mode === 'debug' ? before.sessionId : '')) : ''
     const r = await agentFor(chat)
     // 以「实际有没有换会话」为准：映射里记着但会话已经找不回来时，上面会新建一条
     const created = r.sessionId !== prevId
@@ -1161,9 +1177,12 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     const m = map()
     const e = m.chats[chatId]
     if (!e) return false
-    Promise.resolve(reg?.archiveSession?.(e.sessionId)).catch((error) => log.debug('归档会话失败：', error.message))
-    sessionToChat.delete(sessionKey(e.sessionId))
-    turnState.delete(sessionKey(e.sessionId))
+    // 正式和调试两条都归档
+    for (const sid of sessionsOf(e)) {
+      Promise.resolve(reg?.archiveSession?.(sid)).catch((error) => log.debug('归档会话失败：', error.message))
+      sessionToChat.delete(sessionKey(sid))
+      turnState.delete(sessionKey(sid))
+    }
     delete m.chats[chatId]
     saveMap(m)
     log.info(`${chatId} 重新开始`)
@@ -1176,14 +1195,16 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     const m = map()
     let n = 0
     for (const [chatId, e] of Object.entries(m.chats)) {
-      try {
-        // 可能返回 Promise：必须接住 rejection，未处理的 rejection 会让 DSH 宿主退出
-        Promise.resolve(reg?.archiveSession?.(e.sessionId)).catch((error) => log.debug('归档会话失败：', error.message))
-      } catch (error) {
-        log.debug('归档会话失败：', error.message)
+      for (const sid of sessionsOf(e)) {
+        try {
+          // 可能返回 Promise：必须接住 rejection，未处理的 rejection 会让 DSH 宿主退出
+          Promise.resolve(reg?.archiveSession?.(sid)).catch((error) => log.debug('归档会话失败：', error.message))
+        } catch (error) {
+          log.debug('归档会话失败：', error.message)
+        }
+        sessionToChat.delete(sessionKey(sid))
+        turnState.delete(sessionKey(sid))
       }
-      sessionToChat.delete(sessionKey(e.sessionId))
-      turnState.delete(sessionKey(e.sessionId))
       delete m.chats[chatId]
       n++
     }
