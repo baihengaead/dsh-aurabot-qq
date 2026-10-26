@@ -196,9 +196,13 @@ test('语音：语速 / 音调只认 ±N% 和 ±NHz，写着玩的和超范围�
   assert.equal(v({ pitch: '999Hz' }).pitch, '+50Hz', '超范围夹到 ±50Hz')
   assert.equal(v({ pitch: '大声点' }).pitch, '+0Hz', '乱写的回落默认')
   assert.equal(v({ pitch: '' }).pitch, '+0Hz')
+  assert.equal(v({ pitch: '+0Hz' }).pitch, '+0Hz', '0 也要带正号，否则下拉框对不上选项')
+  assert.equal(v({ pitch: '0Hz' }).pitch, '+0Hz', '缺正号的补上')
   // 语速
   assert.equal(v({ rate: '+10%' }).rate, '+10%')
   assert.equal(v({ rate: '-5%' }).rate, '-5%')
   assert.equal(v({ rate: '999%' }).rate, '+50%')
   assert.equal(v({ rate: '快一点' }).rate, '+0%')
+  assert.equal(v({ rate: '+0%' }).rate, '+0%', '正常语速也要带正号')
+  assert.equal(v({ rate: '0%' }).rate, '+0%')
 })
