@@ -689,6 +689,36 @@ export function apply(ctx) {
       return { ok: false, message: error.message, list: [] }
     }
   })
+  // 诊断用：插件自己的「看图」为什么拿不到文字 —— 把三种传图方式一次试完
+  // （临时接口，查清楚就可以删）
+  route('/debug/look-test', async () => {
+    const img = { data: 'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAJUlEQVR42mNk+M9Qz0AEYBxVSF+FjIOiICgKiqEMKhyoCsDkAABeCwm3n0m4WQAAAABJRU5ErkJggg==', mediaType: 'image/png' }
+    const out = []
+    const probe = async (label, fn) => {
+      const t = Date.now()
+      try { out.push({ case: label, ok: true, ms: Date.now() - t, ...(await fn()) }) } catch (error) { out.push({ case: label, ok: false, ms: Date.now() - t, message: String((error && error.message) || error).slice(0, 240) }) }
+    }
+    await probe('① 纯文字（对照）', async () => ({ text: String(await askModel(ctx, { cfg, system: '只回复两个字', text: '在吗', maxTokens: 300 })).slice(0, 60) }))
+    await probe('② askModel + 图片（现在用的）', async () => {
+      const text = await askModel(ctx, { cfg, system: '用一句话说这张图是什么颜色', text: '这是什么颜色', images: [img], maxTokens: 300 })
+      return { text: String(text || '').slice(0, 100), empty: !text }
+    })
+    await probe('③ 跳过附件登记，直接给 llm.stream 原始 image 块', async () => {
+      const llm = ctx.llm || ctx.get('llm')
+      const t = defaultModel(ctx, cfg)
+      let text = ''
+      const types = new Set()
+      for await (const ch of llm.stream({ provider: t.provider, model: t.model, system: '用一句话说这张图是什么颜色', messages: [{ role: 'user', id: 'probe', content: [{ type: 'text', text: '这是什么颜色' }, { type: 'image', data: img.data, mediaType: img.mediaType }] }], maxTokens: 300, temperature: 0.2 })) {
+        if (!ch) continue
+        types.add(ch.type)
+        if (ch.type === 'text-delta') text += ch.text
+        if (ch.type === 'finish' && ch.reason && ch.reason.kind === 'error') throw new Error(JSON.stringify(ch.reason).slice(0, 240))
+      }
+      return { text: text.slice(0, 100), empty: !text, chunks: [...types] }
+    })
+    return { ok: true, model: cfg.model, out }
+  })
+
   route('/model/ping', async (req) => {
     const b = await readBody(req)
     const t = Date.now()

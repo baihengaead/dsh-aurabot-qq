@@ -187,6 +187,7 @@ export function createImageGen({ getConfig, log, local, dsh }) {
       })
       const t = String(text || '').trim()
       if (t) log.info(`画完自己看了一眼：${t.slice(0, 60)}`)
+      else log.warn('画完想看自己画的图，但模型没返回文字（和表情起名是同一个毛病）')
       return t
     } catch (error) {
       log.debug('画完看图失败（模型可能不支持看图）：', error.message)
