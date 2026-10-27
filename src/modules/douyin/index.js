@@ -185,6 +185,10 @@ export default {
     api.route('/douyin/browser-login/status', async () => dy.browserLoginStatus())
     api.route('/douyin/browser-login/refresh', async () => dy.refreshBrowserLogin())
     api.route('/douyin/run', async () => dy.run({ force: true }))
+    api.route('/douyin/share', async (req) => {
+      const b = await http.body(req).catch(() => ({}))
+      return dy.shareToOwner(String(b?.link || ''), String(b?.text || ''))
+    })
     api.route('/douyin/dms', async () => dy.checkOwnerDms())
     api.route('/douyin/replies', async () => dy.checkCommentReplies())
     api.route('/douyin/confirm-owner', async (req) => {

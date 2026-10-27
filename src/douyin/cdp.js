@@ -880,10 +880,25 @@ export function createBrowserDriver({ profileDir, browserPath = '', minimize = t
     const scraped = extractOwnerProfile(snap || {})
     // 网络里的 profile/other 作补全（RENDER_DATA 偶发没有 uid）
     if ((!scraped.uid || !scraped.secUid) && lastUserProfile) {
-      if (!scraped.secUid && lastUserProfile.secUid) scraped.secUid = lastUserProfile.secUid
-      if (!scraped.uid && lastUserProfile.uid) scraped.uid = normalizeOwnerUid(lastUserProfile.uid)
-      if (!scraped.nickname && lastUserProfile.nickname) scraped.nickname = lastUserProfile.nickname
-      if (!scraped.avatar && lastUserProfile.avatar) scraped.avatar = lastUserProfile.avatar
+      const same = !scraped.secUid || !lastUserProfile.secUid || lastUserProfile.secUid === scraped.secUid
+      if (same) {
+        if (!scraped.secUid && lastUserProfile.secUid) scraped.secUid = lastUserProfile.secUid
+        if (!scraped.uid && lastUserProfile.uid) scraped.uid = normalizeOwnerUid(lastUserProfile.uid)
+        if (!scraped.nickname && lastUserProfile.nickname) scraped.nickname = lastUserProfile.nickname
+        if (!scraped.avatar && lastUserProfile.avatar) scraped.avatar = lastUserProfile.avatar
+      }
+    }
+    // 再等一会儿网络 profile（只认 secUid 对得上的）
+    if (!scraped.uid && scraped.secUid) {
+      const deadline = Date.now() + 8000
+      while (Date.now() < deadline && !(lastUserProfile?.uid && lastUserProfile?.secUid === scraped.secUid)) {
+        await sleep(300)
+      }
+      if (lastUserProfile?.uid && lastUserProfile?.secUid === scraped.secUid) {
+        scraped.uid = normalizeOwnerUid(lastUserProfile.uid)
+        if (!scraped.nickname && lastUserProfile.nickname) scraped.nickname = lastUserProfile.nickname
+        if (!scraped.avatar && lastUserProfile.avatar) scraped.avatar = lastUserProfile.avatar
+      }
     }
     scraped.uid = normalizeOwnerUid(scraped.uid)
     if (!scraped.secUid) return { ok: false, message: '打开主页后还是认不出 sec_uid，请改用主页链接' }

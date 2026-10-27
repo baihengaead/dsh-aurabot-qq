@@ -362,6 +362,26 @@ test('extractOwnerProfile：RENDER_DATA URL 编码与 html 均可抠出数字 ui
   assert.equal(util.normalizeOwnerUid('12345'), '12345')
 })
 
+test('extractOwnerProfile：不吃浏览器登录态整页 uid（须 secUid 匹配或窗口内）', () => {
+  const sec = 'MS4wLjABAAAAabcdefghijklmnopqrs'
+  // 整页靠前有登录态 uid，但没有匹配 secUid 的节点 / 窗口 → 不应认成主人 uid
+  const htmlFar = `"uid":"7675288911115453489" noise nowhere near target`
+  const far = util.extractOwnerProfile({ href: `https://www.douyin.com/user/${sec}`, html: htmlFar })
+  assert.equal(far.secUid, sec)
+  assert.equal(far.uid, '', '远离 secUid 的整页 uid 不能当主人')
+
+  // 同节点带匹配 secUid 才认
+  const payload = {
+    app: { user: { userInfo: { secUid: sec, uid: '33533115713', nickname: '_Future' } } },
+    self: { user: { userInfo: { secUid: 'OTHERSECUIDOTHERSECUIDXX', uid: '7675288911115453489', nickname: 'Next_Future' } } },
+  }
+  const fromRender = util.extractOwnerProfile({
+    href: `https://www.douyin.com/user/${sec}`,
+    renderData: encodeURIComponent(JSON.stringify(payload)),
+  })
+  assert.equal(fromRender.uid, '33533115713', '只认 secUid 匹配节点上的 uid')
+})
+
 test('#4 卡在精选：ensureRecommend 失败则本轮不刷', async () => {
   const { d } = fakes({ decisions: [], script: { stuckOnFeatured: true } })
   const r = await d.run({ force: true })

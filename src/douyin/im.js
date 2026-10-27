@@ -117,6 +117,9 @@ export function createFakeImClient(script = {}) {
       if (!st.loggedIn) return { ok: false, message: IM_NOT_LOGGED_IN }
       return { ok: true }
     },
+    async resolveTarget(target) {
+      return resolvePeer(target || {})
+    },
     async sendText(target, text) {
       const online = await this.ensureOnline()
       if (!online.ok) throw new Error(online.message)
@@ -461,7 +464,17 @@ export async function createRealImClient({ dataPath } = {}) {
           return { ok: true, uid: String(f.uid || f.id), secUid, contact: f }
         }
       }
-      return { ok: false, message: `IM 通讯录里找不到 sec_uid=${secUid} 的人，请填数字 uid 或先有会话` }
+      // 通讯录没有时，走 douyin-im 的 profile/other（用 secUid 换数字 uid）
+      try {
+        const profile = await acc.im?.getUserProfile?.(secUid)
+          || (await acc.im?.userDirectory?.getProfile?.(secUid))
+          || (await acc.im?.userDirectory?.resolve?.([secUid]))?.[0]
+        const id = String(profile?.uid || profile?.user_id || profile?.userId || '')
+        if (/^\d{5,20}$/.test(id)) {
+          return { ok: true, uid: id, secUid, contact: null, lazyUid: id }
+        }
+      } catch (error) { /* 下面统一报错 */ }
+      return { ok: false, message: `IM 用 sec_uid=${secUid} 换不到对方 uid，请互关一次或稍后再试` }
     }
     return { ok: false, message: '没有对方 uid / sec_uid' }
   }
@@ -499,7 +512,7 @@ export async function createRealImClient({ dataPath } = {}) {
         login.message = login.error
         login.qrDataUrl = ''
       })
-      const deadline = Date.now() + 20000
+      const deadline = Date.now() + 60000
       while (Date.now() < deadline) {
         if (
           login.qrDataUrl
@@ -556,6 +569,7 @@ export async function createRealImClient({ dataPath } = {}) {
 
   return {
     client,
+    resolveTarget: async (target) => resolvePeer(currentAccount(), target),
     status,
     getLoginStatus: () => snapshotLogin(login.phase !== 'idle' && login.phase !== 'logged_in'),
     startQrLogin,

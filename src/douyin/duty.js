@@ -96,6 +96,30 @@ export function createDouyin({ getConfig, hub, memory, log, driver: injected, im
     return { uid: o.uid || '', secUid: o.secUid || '' }
   }
 
+  /** CDP 偶发抠不出主人数字 uid；IM 在线后用 secUid 补全并写回配置 */
+  async function ensureOwnerUid() {
+    const o = cfg().owner || {}
+    if (o.uid && /^\d{5,20}$/.test(String(o.uid))) {
+      return { ok: true, uid: String(o.uid), secUid: o.secUid || '' }
+    }
+    if (!o.secUid) return { ok: false, message: '主人号还没核对 sec_uid' }
+    const need = await requireIm()
+    if (!need.ok) return need
+    if (typeof need.im.resolveTarget !== 'function') {
+      return { ok: false, message: '当前 IM 客户端不支持用 sec_uid 换 uid' }
+    }
+    const peer = await need.im.resolveTarget({ uid: o.uid || '', secUid: o.secUid })
+    if (!peer?.ok || !peer.uid) {
+      return { ok: false, message: peer?.message || 'sec_uid 换 uid 失败' }
+    }
+    const st = need.im.status?.() || {}
+    if (st.uid && String(st.uid) === String(peer.uid)) {
+      return { ok: false, message: '换到的 uid 和当前 IM 登录号相同——主人号应是大号，IM 请扫小号' }
+    }
+    getConfig._setOwner?.({ ...o, uid: String(peer.uid) })
+    return { ok: true, uid: String(peer.uid), secUid: o.secUid }
+  }
+
   function socialInterruptOn() {
     return cfg().socialInterruptBrowse !== false // 默认开
   }
@@ -314,7 +338,12 @@ export function createDouyin({ getConfig, hub, memory, log, driver: injected, im
     }
     if (cleanText(d.share) && perm('douyinShareOwner') !== 'off' && ownerConfirmed(getConfig()) && !paused(s)) {
       const text = cleanText(d.share, 80)
-      const target = ownerImTarget()
+      const ensured = await ensureOwnerUid()
+      if (!ensured.ok) {
+        record(s, { kind: 'shareOwner', ok: false, text: ensured.message })
+        return
+      }
+      const target = { uid: ensured.uid, secUid: ensured.secUid || ownerImTarget().secUid }
       const r = await doWrite(s, 'shareOwner', async () => {
         const need = await requireIm()
         if (!need.ok) throw new Error(need.message)
@@ -619,7 +648,9 @@ export function createDouyin({ getConfig, hub, memory, log, driver: injected, im
       const w = await watch(link)
       if (!w.ok) return w
       const msg = cleanText(text || '分享给你', 80)
-      const target = ownerImTarget()
+      const ensured = await ensureOwnerUid()
+      if (!ensured.ok) return ensured
+      const target = { uid: ensured.uid, secUid: ensured.secUid || ownerImTarget().secUid }
       const r = await doWrite(s, 'shareOwner', async () => {
         await need.im.shareWork(target, { itemId: w.awemeId, title: w.desc, author: w.author }, msg)
       }, { awemeId: w.awemeId, text: msg, secUid: target.secUid })

@@ -62,10 +62,11 @@ export function extractOwnerProfile({ href = '', html = '', renderData = '', nic
   if (hm) secUid = hm[1]
 
   let uid = ''
+  // 只认「带匹配 secUid 的节点」上的 uid，避免吃到浏览器登录态自己的 uid
   const preferUid = (cand, sid) => {
     const n = normalizeOwnerUid(cand)
     if (!n) return
-    if (!uid || (secUid && sid === secUid)) uid = n
+    if (secUid && sid && sid === secUid) uid = n
   }
 
   const walk = (node) => {
@@ -92,22 +93,21 @@ export function extractOwnerProfile({ href = '', html = '', renderData = '', nic
     /uid%22%3A%22(\d{5,20})/,
     /uid%22%3A(\d{5,20})/,
   ]
+  // 在 secUid 附近窗口抠 uid（窗口本身已限定主人，不再要求同节点带 sid）
   if (!uid && secUid) {
     const idx = blob.indexOf(secUid)
     if (idx >= 0) {
-      const win = blob.slice(Math.max(0, idx - 1200), idx + 1200)
+      const win = blob.slice(Math.max(0, idx - 2500), idx + 2500)
       for (const re of patterns) {
         const m = win.match(re)
-        if (m) { preferUid(m[1], secUid); break }
+        if (m) {
+          const n = normalizeOwnerUid(m[1])
+          if (n) { uid = n; break }
+        }
       }
     }
   }
-  if (!uid) {
-    for (const re of patterns) {
-      const m = blob.match(re)
-      if (m) { preferUid(m[1], ''); break }
-    }
-  }
+  // 故意不再做「整页任意 uid」回落，避免吃到浏览器登录态自己的 uid
   if (!secUid) {
     const sm = blob.match(/"secUid"\s*:\s*"([A-Za-z0-9_-]{20,})"/) || blob.match(/"sec_uid"\s*:\s*"([A-Za-z0-9_-]{20,})"/)
     if (sm) secUid = sm[1]
