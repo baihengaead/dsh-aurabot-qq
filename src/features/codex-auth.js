@@ -110,6 +110,24 @@ export function parseAuthInput (input, redirectUri = REDIRECT_URI) {
 }
 
 /**
+ * 用系统默认浏览器打开链接。
+ * ⚠ Windows 上**不能**用 `cmd /c start "" <url>`：链接里的 `&` 会被 cmd 当成命令分隔符，
+ *   浏览器只拿到第一个 `&` 之前的部分（授权链接就是这么被截断、登不进去的）。
+ *   rundll32 直接收 argv，不经过 shell，`&`、`?`、`=` 都原样带过去。
+ */
+export function openInBrowser (url, { run = spawn, platform = process.platform } = {}) {
+  try {
+    const opts = { detached: true, stdio: 'ignore' }
+    if (platform === 'win32') run('rundll32', ['url.dll,FileProtocolHandler', url], opts).unref()
+    else if (platform === 'darwin') run('open', [url], opts).unref()
+    else run('xdg-open', [url], opts).unref()
+    return true
+  } catch (error) {
+    return false
+  }
+}
+
+/**
  * @param {object} deps
  * @param {object} [deps.log]
  * @param {Function} [deps.fetchImpl] 测试可注入
@@ -208,16 +226,7 @@ export function createCodexAuth ({ log, fetchImpl, openUrl } = {}) {
     return cred
   }
 
-  function defaultOpenUrl (url) {
-    try {
-      if (process.platform === 'win32') spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref()
-      else if (process.platform === 'darwin') spawn('open', [url], { detached: true, stdio: 'ignore' }).unref()
-      else spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref()
-      return true
-    } catch (error) {
-      return false
-    }
-  }
+  const defaultOpenUrl = (url) => openInBrowser(url)
 
   /**
    * 本地回调服务：先试 1455（Codex CLI 的约定端口），被占用就换一个随机端口。

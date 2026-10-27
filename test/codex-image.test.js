@@ -207,3 +207,20 @@ test('缺 chatgpt.tokens.use.direct 的授权会被拒绝（说明订阅没生�
   await assert.rejects(() => auth.ensureAccess(), /chatgpt\.tokens\.use\.direct/)
   auth.logout()
 })
+
+test('Windows 打开浏览器不能走 cmd（URL 里的 & 会被截断）', async () => {
+  const { openInBrowser } = await import('../src/features/codex-auth.js')
+  const calls = []
+  const run = (bin, args) => ({ unref () { calls.push({ bin, args }) } })
+  const url = 'https://auth.openai.com/api/accounts/authorize?client_id=dynamic_agent_client&scope=a+b&nonce=n'
+  assert.equal(openInBrowser(url, { run, platform: 'win32' }), true)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].bin, 'rundll32')
+  assert.equal(calls[0].args[1], url, '整条链接要原样交给浏览器')
+  assert.ok(!/cmd/i.test(calls[0].bin), '不能走 cmd：& 会被当成命令分隔符')
+  // 其它平台照旧
+  openInBrowser(url, { run, platform: 'darwin' })
+  assert.equal(calls[1].bin, 'open')
+  openInBrowser(url, { run, platform: 'linux' })
+  assert.equal(calls[2].bin, 'xdg-open')
+})

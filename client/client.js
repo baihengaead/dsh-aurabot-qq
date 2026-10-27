@@ -2177,7 +2177,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h('div', { className: 'ab-small' }, waiting.needPaste
             ? '在浏览器里打开下面这条链接登录；登录后会跳到 localhost 地址，把整条地址复制到下面。'
             : '浏览器已打开登录页；这里会自动完成。要是浏览器没弹出来，复制下面链接手动打开。'),
-          h('div', { className: 'ab-small', style: { wordBreak: 'break-all', margin: '6px 0', opacity: 0.8 } }, waiting.url),
+          h('a', { href: waiting.url, target: '_blank', rel: 'noreferrer', className: 'ab-small', style: { display: 'block', wordBreak: 'break-all', margin: '6px 0', opacity: 0.85 } }, waiting.url),
           h('div', { className: 'ab-flex', style: { gap: 6, marginTop: 6, flexWrap: 'wrap' } },
             h(Btn, { small: true, onClick: () => { try { navigator.clipboard.writeText(waiting.url); toast('链接已复制') } catch (e) { toast('复制失败，手动选中吧') } } }, '复制登录链接'),
             h('input', { className: 'ab-input', style: { flex: 1, minWidth: 220 }, value: paste, placeholder: '粘贴地址栏里那整条 http://127.0.0.1:…/auth/callback?code=…', onChange: (e) => setPaste(e.target.value) }),
