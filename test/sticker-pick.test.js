@@ -95,4 +95,29 @@ test('拿不到了：没这张编号时给个说法，不报错', async () => {
   assert.equal(api.hub.stickerOf('private:10000001', 9), null, '没有第 9 张')
 })
 
+test('群里也收得到「她挑」的提示（以前群聊那条路会把它丢掉）', async () => {
+  // 上一条用例把模式切成了 auto，这里切回「她挑」
+  const cur = api.getConfig()
+  api.setConfig({ ...cur, allow: { ...cur.allow, groups: ['999999'] }, stickers: { ...cur.stickers, collectMode: 'ask' } })
+  const before = fake.turns.length
+  await api.hub.onMessage({
+    post_type: 'message', message_type: 'group', sub_type: 'normal',
+    self_id: Number(BOT), group_id: 999999, user_id: 10000002, time: Math.floor(Date.now() / 1000),
+    message_id: Math.floor(Math.random() * 1e6),
+    message: [
+      { type: 'at', data: { qq: String(BOT) } },
+      { type: 'text', data: { text: '看这张' } },
+      { type: 'image', data: { sub_type: 1, file: 'base64://' + png(4).toString('base64') } },
+    ],
+    sender: { user_id: 10000002, nickname: '群友', card: '群友', role: 'member' },
+  })
+  await wait(2500)
+  const fresh = fake.turns.slice(before)
+  assert.ok(fresh.length >= 1, '群里 @ 她应该走一轮')
+  const t = fresh.at(-1)
+  assert.match(String(t.userText), /qq_collect_sticker/, '群里也该告诉她可以收表情')
+  assert.match(String(t.userText), /你自己的小爱好/, '措辞要是她自己的念头，不是发图的人在提醒')
+  assert.equal(library().length, 2, '只是提示，她没说要收，库里不该多')
+})
+
 after(() => fake.dispose())

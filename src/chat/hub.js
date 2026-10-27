@@ -79,6 +79,17 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     const i = Number(index) - 1
     return Number.isInteger(i) && i >= 0 && i < s.segs.length ? s.segs[i] : null
   }
+
+  /**
+   * 「她挑」模式那句轻提示。
+   * 措辞要像她自己的念头，不能像发图的人在提醒她 —— 否则每来一张表情她就回报一次
+   * “我收了 / 我已经有了”，完全不像偷偷攒表情。收不收、说不说都随她。
+   */
+  function stickerHint (n) {
+    const range = n > 1 ? `1~${n}` : '1'
+    return `（这轮里夹着 ${n} 张表情，是你自己看到的。有中意的就用 qq_collect_sticker ${range} 收进自己库；收表情是你自己的小爱好，不用每张都跟对方说，偶尔提一句也行。）`
+  }
+
   const groupRefs = new Map() // groupId → { 编号: QQ 消息 ID }  上一段提示词里的编号，引用回复用
   const groupEngaged = new Map() // groupId → 加入话题到什么时候（毫秒）
   const ENGAGE_MS = 3 * 60_000
@@ -939,18 +950,13 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       }
     }
     logChat(msg.chatId, msg.nickname, text, msg.userId)
-    // 「她挑」模式：把这一轮收到的表情告诉她，收不收由她定
-    if (stickerPick) {
-      content.push({
-        type: 'text',
-        text: `（这一轮还有 ${stickerPick} 个表情。你要是喜欢，可以调 qq_collect_sticker 收进自己的表情库，编号 1${stickerPick > 1 ? '~' + stickerPick : ''}，名字你自己起；不喜欢就别管。）`,
-      })
-    }
     lastChatAt = now
     if (msg.kind === 'private' && msg.userId === cfg.ownerQQ) lastOwnerChatAt = now
     onActivity?.({ kind: 'in', chatId: msg.chatId, userId: msg.userId, nickname: msg.nickname, text, direct: msg.kind === 'private' || msg.mentioned || mode === 'must', owner: isOwner(cfg, msg.userId) })
 
-    enqueue({ chatId: msg.chatId, kind: msg.kind, userId: msg.userId, groupId: msg.groupId, nickname: msg.nickname }, content, msg.userId, wantsVoice(msg.text), mode)
+    // 「她挑」：只把张数记在这条待发的消息上，等 flush 拼提示词时再补一句
+    // （以前直接塞进 content，群聊那条路会把它丢掉，等于群里收不到提示）
+    enqueue({ chatId: msg.chatId, kind: msg.kind, userId: msg.userId, groupId: msg.groupId, nickname: msg.nickname }, content, msg.userId, wantsVoice(msg.text), mode, { stickerPick })
   }
 
   /** 把消息里的「[合并转发]」换成里面的聊天记录（最多 40 条，嵌套的转发不再展开）。 */
@@ -1073,7 +1079,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     return (key && running.get(chatId) === key) || Date.now() - busy.get(chatId) < BUSY_MAX_MS
   }
 
-  function enqueue(chat, content, senderId, wantVoice, mode = 'must') {
+  function enqueue(chat, content, senderId, wantVoice, mode = 'must', extra = {}) {
     const m = getConfig().merge
     const p = pending.get(chat.chatId) || { chat, texts: [], images: [], senders: new Set(), wantVoice: false, timer: null, firstAt: Date.now(), mode, count: 0 }
     p.chat = chat
@@ -1083,6 +1089,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       if (c.type === 'text') p.texts.push(c.text)
       else if (c.type === 'image' && p.images.length < 4) p.images.push(c)
     }
+    if (extra.stickerPick) p.stickerPick = (p.stickerPick || 0) + extra.stickerPick
     if (senderId) p.senders.add(String(senderId))
     p.wantVoice = p.wantVoice || wantVoice
     pending.set(chat.chatId, p)
@@ -1101,11 +1108,13 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     const p = pending.get(chatId)
     if (!p) return
     clearTimeout(p.timer)
+    // 「她挑」的提示统一在这里补：私聊、群聊、插话三条路都要带上
+    const hint = p.stickerPick ? '\n\n' + stickerHint(p.stickerPick) : ''
     // 私聊：她这一轮还在跑（想 / 调工具），新消息直接 steer 进当前这一轮，像在 DSH 界面里插话一样（#7）
     if (isBusy(chatId) && p.chat.kind === 'private' && running.has(chatId)) {
       pending.delete(chatId)
       if (p.count > 1) log.info(`${chatId}：合并了 ${p.count} 条消息一起插给她`)
-      const content = [{ type: 'text', text: p.texts.join('\n') }, ...p.images]
+      const content = [{ type: 'text', text: p.texts.join('\n') + hint }, ...p.images]
       const query = p.texts.map((t) => t.replace(/^【私聊】[^：]*：/, '')).join('\n')
       const [first, ...rest] = [...p.senders]
       try {
@@ -1138,11 +1147,11 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       }
       const gp = await groupPrompt(p.chat, p.mode)
       if (gp.speakers.length) lastSpeaker.set(chatId, [...p.senders].pop() || gp.speakers.at(-1))
-      content = [{ type: 'text', text: gp.text }, ...p.images]
+      content = [{ type: 'text', text: gp.text + hint }, ...p.images]
       p.query = gp.query
       p.speakers = gp.speakers
     } else {
-      content = [{ type: 'text', text: p.texts.join('\n') }, ...p.images]
+      content = [{ type: 'text', text: p.texts.join('\n') + hint }, ...p.images]
     }
     try {
       const [first, ...rest] = [...p.senders]

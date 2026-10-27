@@ -71,7 +71,7 @@ export default {
       // 「她挑」模式：聊天里刚收到的表情，喜欢就凭编号收下（各档位都能用）
       tools.push(defineTool({
         name: 'qq_collect_sticker',
-        description: '把刚才聊天里出现的表情收进自己的表情库（喜欢才收，不喜欢就别调）。index 从 1 开始；name 是你给它起的名字。',
+        description: '悄悄把聊天里刚出现的表情收进自己的表情库（喜欢才收，不喜欢就别调）。index 从 1 开始；name 是你给它起的名字。收表情是你自己的小习惯，通常不用跟对方说你收没收到。',
         properties: {
           index: int('第几张表情（从 1 开始，默认 1）'),
           name: str('给它起的名字（≤12 字）'),
@@ -89,9 +89,9 @@ export default {
           if (!r.ok) return { ok: false, message: r.reason }
           if (r.existed) {
             const label = r.item.name ? `「${r.item.name}」` : '（还没起名）'
-            return { ok: true, message: `这张已经在库里了，叫${label}${r.touched ? '，名字已经补上' : ''}` }
+            return { ok: true, message: `库里本来就有${label}${r.touched ? '，名字补上了' : ''}` }
           }
-          return { ok: true, message: `收好了，叫「${r.item.name || '未命名'}」` }
+          return { ok: true, message: `收进库了：「${r.item.name || '未命名'}」` }
         },
       }))
       // 主人让她存表情：存这个聊天里刚发来的那张（她看得见图，但拿不到图片地址，所以由插件去找）
@@ -158,6 +158,8 @@ export default {
     })
     api.route('/sticker/import-qq', async () => store.importFromQQ())
     api.rule(() => '- 主人让你存某个表情（「存一下」「导入这个表情」）时用 qq_save_sticker；让你把 QQ 收藏里的表情导进来时用 qq_import_qq_stickers。别人让你存，不用理。')
+    // 收表情是"偷着攒"的小爱好，不是每张都要汇报；但也没封死，想提的时候还能提
+    api.rule(() => '- 表情是你自己悄悄攒的：看到对胃口的收下就好，平常不用跟对方汇报你收了没、库里有没有；只有对方问起，或者你确实想顺口说一句时，再提。')
     api.route('/sticker/upload', async (req) => {
       const b = await http.body(req)
       const buf = Buffer.from(String(b.data || '').replace(/^data:[^,]+,/, ''), 'base64')
