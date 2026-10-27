@@ -455,13 +455,14 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       { id: 'mood', label: '心情与记忆', flag: 'mood.enabled' },
       { id: 'song', label: '翻唱', flag: 'song.enabled' },
       { id: 'bili', label: 'B站', flag: 'bili.enabled' },
+      { id: 'douyin', label: '抖音', flag: 'douyin.enabled' },
       { id: 'local', label: '本地接口' },
       { id: 'security', label: '安全防护' },
       { id: 'modules', label: '扩展' },
       { id: 'logs', label: '日志' },
     ]
     // 内置标签页属于哪个模块：模块都没在跑就不显示这一页
-    const TAB_MODS = { voice: ['voice'], stickers: ['stickers'], imagegen: ['imagegen'], diary: ['diary', 'qzone-social'], speakup: ['speakup'], mood: ['mood', 'memory'], song: ['song'], bili: ['bili'] }
+    const TAB_MODS = { voice: ['voice'], stickers: ['stickers'], imagegen: ['imagegen'], diary: ['diary', 'qzone-social'], speakup: ['speakup'], mood: ['mood', 'memory'], song: ['song'], bili: ['bili'], douyin: ['douyin'] }
     const modOn = (st, id) => (st.modules || []).some((m) => m.id === id && m.running)
     function ModOff({ name }) {
       return h(Card, { title: name }, h('div', { className: 'ab-muted ab-small' }, '「' + name + '」模块关着，这部分用不了。要用的话去「扩展」页把它打开。'))
@@ -768,13 +769,51 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                 { value: 'chat', label: '纯聊天', desc: '什么工具都没有，只聊天' },
               ] }),
               h('div', { className: 'ab-muted ab-small', style: { marginTop: 8 } }, '切换后会给主人私聊换一个新的 DSH 会话（旧的还在侧栏里）。'))),
+          h(Row, { label: '长任务模式', hint: '只在「完整」权限下生效。打开后她能把命令放到后台跑、跑完自动回来告诉你，也能设定时任务；工具多一点，回话会稍慢。切换后同样换新会话。' },
+            h(Choices, { value: draft.longTasks ? 'on' : 'off', onChange: (v) => setDraft(setPath(draft, 'longTasks', v === 'on')), options: [
+              { value: 'off', label: '关', desc: '维持现在的速度（默认）' },
+              { value: 'on', label: '开', desc: '挂上后台任务（jobs）+ 定时任务（schedule）' },
+            ] })),
         ),
+        h(ProfilePerms, { draft, setDraft }),
         h(Card, { title: '白名单', desc: '只有名单里的人和群，她才会理。一行一个号码。' },
           h(Row, { label: '私聊白名单', hint: '主人默认就在里面。' }, f.list('allow.private', { placeholder: '每行一个 QQ 号', numbers: true })),
           h(Row, { label: '群白名单', hint: '把机器人拉进群后，把群号加到这里。' }, f.list('allow.groups', { placeholder: '每行一个群号', numbers: true })),
         ),
         h(GroupRoles, null),
         h(CommandList, null),
+      )
+    }
+
+    /** 改资料类操作的权限：关 / 仅主人私聊 / 所有人。 */
+    function ProfilePerms({ draft, setDraft }) {
+      const perms = draft.profilePerms || {}
+      const opts = [
+        { value: 'off', label: '关', desc: '谁说都不改' },
+        { value: 'owner', label: '仅主人私聊', desc: '只有你私聊让她改才改（默认）' },
+        { value: 'all', label: '所有人', desc: '白名单里的人、群里的人都能让她改' },
+      ]
+      const row = (key, label, hint) => h(Row, { label, hint },
+        h(Choices, { value: perms[key] || 'owner', onChange: (v) => setDraft(setPath(draft, 'profilePerms.' + key, v)), options: opts }))
+      return h(Card, { title: '改资料与名单', desc: '她能不能听人的话改自己的 QQ 昵称、签名、头像和 B 站签名，处理好友申请、改白名单，以及抖音上的各项操作（含改签名/昵称/头像）。改 QQ 资料要 SnowLuma 支持（set_qq_profile / set_self_longnick / set_qq_avatar）。抖音各项默认仅主人，要放开自己在这里开。' },
+        row('qqNickname', 'QQ 昵称'),
+        row('qqSignature', 'QQ 个性签名'),
+        row('qqAvatar', 'QQ 头像', '只用网址图片，或「刚才发的那张图」。'),
+        row('biliSign', 'B 站签名', '要先在 B 站页登录并打开 B 站。'),
+        row('biliAvatar', 'B 站头像', '要先在 B 站页登录并打开 B 站。图片网址或刚才发的图，最大 2MB。'),
+        row('qqFriendRequest', '处理好友申请', '让她通过 / 拒绝别人加她为好友的申请。她自己主动加别人暂不支持（SnowLuma 没有这个接口）。'),
+        row('whitelist', '改白名单', '让她把 QQ 号 / 群号加进或移出下面的白名单。主人不会被移出。开成「所有人」前请想清楚。'),
+        row('douyinBrowse', '刷抖音 / 看视频', '定时刷推荐、点开别人发来的抖音链接。默认仅主人。'),
+        row('douyinLike', '抖音点赞', '刷到视频时顺手点赞。'),
+        row('douyinComment', '抖音评论', '刷到视频时发评论。'),
+        row('douyinReplyComment', '回抖音评论', '别人回她评论时接着回。'),
+        row('douyinFollow', '抖音关注', '仅工具请求（douyin_follow）；刷流不会自动关注。'),
+        row('douyinDm', '私信任何人', '建议用小号。别人让她发私信时用。'),
+        row('douyinShareOwner', '分享给主人抖音', '好玩的视频私信分享到你的抖音。要先在「抖音」页核对你的号。'),
+        row('douyinReplyOwnerDm', '回主人抖音私信', '只回已核对 sec_uid 的你；认不出对方绝不回。'),
+        row('douyinSign', '改抖音签名', '工具 douyin_set_sign；每天有次数上限（默认 2）。'),
+        row('douyinNickname', '改抖音昵称', '工具 douyin_set_nickname；每天有次数上限（默认 2）。'),
+        row('douyinAvatar', '换抖音头像', '工具 douyin_set_avatar；每天最多 1 次。图片网址 / 刚才那张图 / 数据目录本地图。'),
       )
     }
 
@@ -873,6 +912,40 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         }, (g.name && g.name !== g.groupId ? g.name : g.groupId) + (has(g.groupId) ? ' ✓' : ''))))
     }
 
+    /** 按聊天选模型：私聊默认 / 群聊默认两个下拉，单个 QQ / 群的例外放在默认收起的小列表里。 */
+    function ChatModels({ draft, setDraft, list }) {
+      const cm = draft.chatModels || { privateDefault: {}, groupDefault: {}, privates: {}, groups: {} }
+      const [open, setOpen] = useState(false)
+      const [add, setAdd] = useState({ kind: 'private', id: '', sel: '' })
+      const key = (m) => m.provider + '::' + m.model
+      const val = (s) => (s && s.provider && s.model ? s.provider + '::' + s.model : '')
+      const toSel = (v) => { const [p, ...m] = v.split('::'); return v ? { provider: p, model: m.join('::'), reasoningEffort: '' } : { provider: '', model: '', reasoningEffort: '' } }
+      const base = [{ value: '', label: '跟随全局模型', desc: '上面「聊天用的模型」' }].concat((list || []).map((m) => ({ value: key(m), label: m.name, desc: m.provider, group: m.provider })))
+      const optsFor = (v) => (v && !base.some((o) => o.value === v) ? base.concat([{ value: v, label: v.split('::').slice(1).join('::'), desc: '（DSH 里没找到）' }]) : base)
+      const setCm = (patch) => setDraft(setPath(draft, 'chatModels', { ...cm, ...patch }))
+      const rows = [['private', cm.privates || {}], ['group', cm.groups || {}]].flatMap(([kind, m]) => Object.entries(m).map(([id, sel]) => ({ kind, id, sel })))
+      const label = (sel) => { const v = val(sel); const hit = (list || []).find((m) => key(m) === v); return hit ? hit.name : sel.model }
+      const addRow = () => {
+        if (!add.id || !add.sel) return
+        const field = add.kind === 'private' ? 'privates' : 'groups'
+        setCm({ [field]: { ...(cm[field] || {}), [add.id]: toSel(add.sel) } })
+        setAdd({ ...add, id: '' })
+      }
+      const remove = (kind, id) => { const field = kind === 'private' ? 'privates' : 'groups'; const n = { ...(cm[field] || {}) }; delete n[id]; setCm({ [field]: n }) }
+      return h(Card, { title: '按聊天选模型', desc: '顺序：这个私聊 > 这个群 > 所有私聊 / 所有群的默认 > 上面的全局模型。没选的一级就用下一级；选的模型在 DSH 里找不到时也自动退回。只有你能在这里改，聊天里的人换不了。换了之后从那个聊天的下一条消息起生效。' },
+        h(Row, { label: '私聊默认模型' }, h(Select, { value: val(cm.privateDefault), width: 280, options: optsFor(val(cm.privateDefault)), onChange: (v) => setCm({ privateDefault: toSel(v) }) })),
+        h(Row, { label: '群聊默认模型' }, h(Select, { value: val(cm.groupDefault), width: 280, options: optsFor(val(cm.groupDefault)), onChange: (v) => setCm({ groupDefault: toSel(v) }) })),
+        h('div', { style: { marginTop: 8 } }, h(Btn, { small: true, kind: 'ghost', onClick: () => setOpen(!open) }, (open ? '收起' : '展开') + '单个 QQ / 群的例外（' + rows.length + '）')),
+        open ? h('div', { style: { marginTop: 8 } },
+          rows.length === 0 ? h('div', { className: 'ab-muted', style: { marginBottom: 10 } }, '还没有单独设置的 QQ 或群。') :
+            rows.map((r) => h(Row, { key: r.kind + r.id, label: (r.kind === 'private' ? '私聊 ' : '群 ') + r.id }, h('span', { className: 'ab-muted' }, label(r.sel)), h(Btn, { small: true, kind: 'ghost', onClick: () => remove(r.kind, r.id) }, '移除'))),
+          h('div', { className: 'ab-flex' },
+            h(Seg, { value: add.kind, onChange: (v) => setAdd({ ...add, kind: v }), options: [{ value: 'private', label: '私聊' }, { value: 'group', label: '群' }] }),
+            h('input', { className: 'ab-input', placeholder: add.kind === 'private' ? 'QQ 号' : '群号', value: add.id, onChange: (e) => setAdd({ ...add, id: e.target.value.replace(/\D/g, '') }) }),
+            h(Select, { value: add.sel, width: 220, options: base.filter((o) => o.value), placeholder: '选模型', onChange: (v) => setAdd({ ...add, sel: v }) }),
+            h(Btn, { small: true, disabled: !add.id || !add.sel, onClick: addRow }, '添加'))) : null)
+    }
+
     function Model({ draft, setDraft, toast }) {
       const [list, setList] = useState(null)
       const [ping, setPing] = useState({})
@@ -915,6 +988,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             cur ? h(Btn, { small: true, onClick: () => test({ provider: draft.model.provider, model: draft.model.model }) }, '测速') : null,
             cur && ping[cur] ? h('span', { className: 'ab-muted ab-small' }, ping[cur]) : null),
         ),
+        h(ChatModels, { draft, setDraft, list }),
         h(Card, { title: '可用的模型', desc: '点「测速」会真的问一次模型（花一点点额度），看它回一句话要多久。' },
           list === null ? h(Empty, { icon: '⏳', text: '加载中…' }) : list.length === 0 ? h(Empty, { text: 'DSH 没有列出模型' }) :
             h('table', { className: 'ab-table' }, h('tbody', null, list.map((m) => h('tr', { key: key(m) },
@@ -1849,6 +1923,207 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       )
     }
 
+    const DOUYIN_KIND = { watch: '看了', like: '点赞', comment: '评论', replyComment: '回评论', follow: '关注', share: '分享给你', dm: '私信', dmReply: '回你私信', error: '没成功' }
+
+    /** 抖音：专用 Edge 登录、定时刷、点赞 / 评论 / 关注 / 私信、分享给主人、回主人私信。 */
+    function Douyin({ draft, setDraft, toast }) {
+      const f = useField(draft, setDraft)
+      const [s, setS] = useState(null)
+      const [busy, setBusy] = useState('')
+      const [brLogin, setBrLogin] = useState(null)
+      const [imLogin, setImLogin] = useState(null)
+      const [smsCode, setSmsCode] = useState('')
+      const load = () => get('/douyin/state').then(setS)
+      useEffect(() => { load() }, [])
+      const loginPhaseText = (p) => ({
+        waiting_scan: '等待扫码',
+        scanned: '已扫待确认',
+        logged_in: '已登录',
+        expired: '过期，点刷新',
+        sms_required: '需要短信验证码',
+        voice_required: '需要语音验证码',
+        verification_required: '需要安全验证',
+        error: '登录失败',
+        idle: '',
+      })[p] || p || ''
+      const toastLogin = (r, okFallback) => {
+        if (r.loggedIn) toast(r.message || okFallback || '已登录', 'ok')
+        else if (r.ok && (r.started || r.qrDataUrl || ['waiting_scan', 'scanned', 'sms_required', 'voice_required', 'verification_required', 'expired'].includes(r.phase))) toast(r.message || loginPhaseText(r.phase) || '请扫码')
+        else toast(r.message || '没成功', 'err')
+      }
+      const act = (path, label, body) => async () => { setBusy(label); const r = body !== undefined ? await post(path, body) : await post(path); setBusy(''); toast(r.message || (r.ok ? '好了' : '没成功'), r.ok ? 'ok' : 'err'); load() }
+      useEffect(() => {
+        const active = brLogin && ['waiting_scan', 'scanned', 'verification_required'].includes(brLogin.phase)
+        if (!active) return undefined
+        const t = setInterval(async () => {
+          const r = await get('/douyin/browser-login/status')
+          setBrLogin(r)
+          if (r.loggedIn) { toast(r.message || '浏览器已登录', 'ok'); load() }
+        }, 2000)
+        return () => clearInterval(t)
+      }, [brLogin && brLogin.phase])
+      useEffect(() => {
+        const active = imLogin && ['waiting_scan', 'scanned', 'sms_required', 'voice_required', 'verification_required'].includes(imLogin.phase)
+        if (!active) return undefined
+        const t = setInterval(async () => {
+          const r = await get('/douyin/im-login/status')
+          setImLogin(r)
+          if (r.loggedIn) { toast(r.message || 'IM 已登录', 'ok'); load() }
+        }, 2000)
+        return () => clearInterval(t)
+      }, [imLogin && imLogin.phase])
+      const startBrowserLogin = async () => {
+        setBusy('login')
+        const r = await post('/douyin/browser-login')
+        setBusy('')
+        setBrLogin(r)
+        toastLogin(r, '浏览器已登录')
+        load()
+      }
+      const refreshBrowserLogin = async () => {
+        setBusy('login')
+        const r = await post('/douyin/browser-login/refresh')
+        setBusy('')
+        setBrLogin(r)
+        toastLogin(r, '浏览器已登录')
+        load()
+      }
+      const startImQrLogin = async () => {
+        setBusy('imlogin')
+        const r = await post('/douyin/im-login')
+        setBusy('')
+        setImLogin(r)
+        toastLogin(r, 'IM 已登录')
+        load()
+      }
+      const refreshImQrLogin = async () => {
+        setBusy('imlogin')
+        const r = await post('/douyin/im-login/refresh')
+        setBusy('')
+        setImLogin(r)
+        toastLogin(r, 'IM 已登录')
+        load()
+      }
+      const submitImSms = async () => {
+        setBusy('imsms')
+        const r = await post('/douyin/im-login/sms', { code: smsCode })
+        setBusy('')
+        setImLogin(r)
+        toastLogin(r, 'IM 已登录')
+        if (r.loggedIn) setSmsCode('')
+        load()
+      }
+      const acct = s && s.account
+      const im = s && s.im
+      const owner = (draft.douyin && draft.douyin.owner) || {}
+      const qrBox = (login, kind) => {
+        if (!login || login.phase === 'idle') return null
+        return h('div', { style: { marginTop: 8, display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' } },
+          login.qrDataUrl ? h('img', {
+            src: login.qrDataUrl,
+            alt: kind + ' 登录二维码',
+            width: 168,
+            height: 168,
+            style: { width: 168, height: 168, borderRadius: 8, background: '#fff', border: '1px solid var(--ab-border, #333)', objectFit: 'contain' },
+          }) : null,
+          h('div', { className: 'ab-small', style: { minWidth: 160, flex: 1 } },
+            h('div', { style: { color: login.loggedIn ? 'var(--ab-ok)' : (login.phase === 'error' || login.phase === 'expired' ? 'var(--ab-warn)' : 'inherit') } },
+              login.loggedIn ? (login.message || '已登录') : (loginPhaseText(login.phase) || login.message || '')),
+            login.message && !login.loggedIn ? h('div', { className: 'ab-muted', style: { marginTop: 4 } }, login.message) : null,
+            login.verifyHint ? h('div', { className: 'ab-note warn', style: { marginTop: 6 } }, login.verifyHint) : null,
+            login.error ? h('div', { className: 'ab-note warn', style: { marginTop: 6 } }, login.error) : null,
+          ))
+      }
+      return h('div', { className: 'ab-grid' },
+        h(Card, { title: '刷抖音', right: f.sw('douyin.enabled'), desc: '内容（刷流/点赞/评论/关注/改资料）用专用 Edge（CDP）；社交（私信、分享给你、回你私信）走 douyin-im，不经浏览器。关注不会在刷流里自动做。总开关默认关——先分别在面板扫码登录浏览器和 IM，再打开开关。' },
+          h(Row, { label: '浏览器路径', hint: '留空 = 自动找 Edge（找不到再找 Chrome）' }, f.text('douyin.browserPath', { size: 'wide', placeholder: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe' })),
+          h(Row, { label: '登录完最小化窗口', hint: '登录时窗口离屏，二维码在面板显示，不抢前台；登录成功后可最小化' }, f.sw('douyin.minimize')),
+          h(Row, { label: '社交打断刷流', hint: '私信/分享进行中时中断刷流，原因写入「上次跳过」' }, f.sw('douyin.socialInterruptBrowse')),
+          h(Row, { label: '分享倾向', hint: '刷到好看的视频时，要不要积极私信分享给你（可调 think 提示）' }, f.choices('douyin.shareBias', [
+            { value: 'proactive', label: '积极', desc: '好看有趣就推，额度没用完尽量分享' },
+            { value: 'normal', label: '适中', desc: '觉得你会喜欢才写 share' },
+            { value: 'stingy', label: '惜分享', desc: '拿不准就空着' },
+          ])),
+          h(Row, { label: '浏览器登录', hint: 'Edge 离屏打开，二维码截到本面板；每 2 秒轮询登录态；过期点刷新' },
+            h('div', null,
+              h('div', { className: 'ab-flex' },
+                h(Btn, { small: true, onClick: startBrowserLogin, disabled: !!busy }, busy === 'login' ? '正在获取二维码…' : '开始浏览器登录'),
+                h(Btn, { small: true, onClick: refreshBrowserLogin, disabled: !!busy }, '刷新二维码'),
+                h(Btn, { small: true, onClick: async () => { const r = await get('/douyin/account'); setS({ ...(s || {}), account: r }) } }, '检查'),
+                acct ? h('span', { className: 'ab-small', style: { color: acct.isLogin ? 'var(--ab-ok)' : 'var(--ab-warn)' } }, acct.verify ? '要验证：' + (acct.reason || '') : acct.needLogin ? '还没登录' : acct.isLogin ? '已登录：' + (acct.nickname || acct.secUid || '') : (acct.reason || acct.error || '未知')) : h('span', { className: 'ab-small ab-muted' }, '未检查')),
+              qrBox(brLogin, '浏览器'))),
+          h(Row, { label: 'IM 登录', hint: '私信 / 分享 / 回主人私信需要 IM 登录；二维码在本面板；会话在本机 data/douyin/im' },
+            h('div', null,
+              h('div', { className: 'ab-flex' },
+                h(Btn, { small: true, onClick: startImQrLogin, disabled: !!busy }, busy === 'imlogin' ? '正在获取二维码…' : '开始 IM 登录'),
+                h(Btn, { small: true, onClick: refreshImQrLogin, disabled: !!busy }, '刷新二维码'),
+                h(Btn, { small: true, onClick: async () => { const r = await get('/douyin/im'); setS({ ...(s || {}), im: r }); const st = await get('/douyin/im-login/status'); setImLogin(st) } }, '检查'),
+                im ? h('span', { className: 'ab-small', style: { color: im.loggedIn ? 'var(--ab-ok)' : 'var(--ab-warn)' } }, im.loggedIn ? ('已登录：' + (im.nickname || im.uid || '')) : (im.reason || '还没登录 IM')) : h('span', { className: 'ab-small ab-muted' }, '未检查')),
+              qrBox(imLogin, 'IM'),
+              imLogin && (imLogin.phase === 'sms_required' || imLogin.phase === 'voice_required') ? h('div', { className: 'ab-flex', style: { marginTop: 8 } },
+                h('input', {
+                  className: 'ab-input',
+                  value: smsCode,
+                  placeholder: imLogin.phase === 'voice_required' ? '语音验证码' : '短信验证码',
+                  onChange: (e) => setSmsCode(e.target.value),
+                  style: { maxWidth: 160 },
+                }),
+                h(Btn, { small: true, kind: 'primary', onClick: submitImSms, disabled: !!busy || !smsCode.trim() }, busy === 'imsms' ? '提交中…' : '提交验证码'),
+              ) : null)),
+        ),
+        h(Card, { title: '主人抖音', desc: '填你的抖音号或主页链接，点「核对」后她才认你（只认 sec_uid，不认昵称）。改了输入要重新核对。' },
+          h(Row, { label: '你的抖音号 / 主页链接' }, f.text('douyin.owner.input', { size: 'wide', placeholder: '抖音号，或 https://www.douyin.com/user/…' })),
+          h('div', { className: 'ab-flex', style: { marginTop: 4 } },
+            h(Btn, { small: true, kind: 'primary', onClick: act('/douyin/confirm-owner', 'confirm', { input: owner.input }), disabled: !!busy }, busy === 'confirm' ? '核对中…' : '核对'),
+            s && s.ownerConfirmed ? h('span', { className: 'ab-small', style: { color: 'var(--ab-ok)' } }, '已核对：' + (s.owner && (s.owner.nickname || s.owner.secUid) || '')) : h('span', { className: 'ab-small ab-muted' }, '还没核对')),
+        ),
+        h(Card, { title: '怎么刷', desc: '只在「主动搭话」里设的醒着时间内刷。' },
+          h(Row, { label: '定时自己去刷' }, f.sw('douyin.autoBrowse')),
+          h(Row, { label: '多久刷一轮' }, f.range('douyin.intervalHours', 1, 24, 1, (v) => v + ' 小时')),
+          h(Row, { label: '每天最多刷' }, f.range('douyin.maxRunsPerDay', 0, 12, 1, (v) => v + ' 轮')),
+          h(Row, { label: '一轮看几个' }, f.range('douyin.perRun', 1, 10, 1, (v) => v + ' 个')),
+          h(Row, { label: '每天最多看' }, f.num('douyin.maxWatchPerDay', { min: 0, max: 200 }), h('span', { className: 'ab-muted' }, '个（含手动）')),
+          h(Row, { label: '每个视频停留' }, f.num('douyin.dwellMin', { min: 3 }), h('span', { className: 'ab-muted' }, '～'), f.num('douyin.dwellMax', { min: 3 }), h('span', { className: 'ab-muted' }, '秒')),
+        ),
+        h(Card, { title: '每天上限', desc: '各项操作的日上限。权限在「权限」页单独设（默认仅主人）。试运行开着时只记日志不真动。' },
+          h(Row, { label: '点赞' }, f.num('douyin.caps.like', { min: 0, max: 300 })),
+          h(Row, { label: '评论' }, f.num('douyin.caps.comment', { min: 0, max: 30 })),
+          h(Row, { label: '回评论' }, f.num('douyin.caps.replyComment', { min: 0, max: 60 })),
+          h(Row, { label: '关注（仅工具）', hint: '刷流不自动关注' }, f.num('douyin.caps.follow', { min: 0, max: 50 })),
+          h(Row, { label: '每天写操作合计', hint: '点赞/评论/关注/私信等合计；登录后前 3 天减半' }, f.num('douyin.gate.maxWritesPerDay', { min: 1, max: 500 })),
+          h(Row, { label: '两次写操作间隔', hint: '秒' }, f.num('douyin.gate.minWriteGapSec', { min: 0, max: 600 })),
+          h(Row, { label: '私信任何人', hint: '建议用小号' }, f.num('douyin.caps.dm', { min: 0, max: 30 })),
+          h(Row, { label: '分享给你' }, f.num('douyin.caps.shareOwner', { min: 0, max: 30 })),
+          h(Row, { label: '回你的私信' }, f.num('douyin.caps.dmReply', { min: 0, max: 200 })),
+          h(Row, { label: '改签名' }, f.num('douyin.caps.sign', { min: 0, max: 20 })),
+          h(Row, { label: '改昵称' }, f.num('douyin.caps.nickname', { min: 0, max: 20 })),
+          h(Row, { label: '换头像' }, f.num('douyin.caps.avatar', { min: 0, max: 10 })),
+          h(Row, { label: '看私信间隔' }, f.num('douyin.dmPollMinutes', { min: 2 }), h('span', { className: 'ab-muted' }, '分钟')),
+          h(Row, { label: '看回评论间隔' }, f.num('douyin.replyPollMinutes', { min: 5 }), h('span', { className: 'ab-muted' }, '分钟')),
+        ),
+        h(Card, { title: '她刷过什么', right: h('div', { className: 'ab-flex' },
+          h(Btn, { small: true, onClick: act('/douyin/dms', 'dms'), disabled: !!busy }, busy === 'dms' ? '正在看…' : '看看主人私信'),
+          h(Btn, { small: true, onClick: act('/douyin/replies', 'replies'), disabled: !!busy }, busy === 'replies' ? '正在看…' : '看看回评论'),
+          h(Btn, { small: true, kind: 'primary', onClick: act('/douyin/run', 'run'), disabled: !!busy }, busy === 'run' ? h(Fragment, null, h('i', { className: 'ab-spin' }), ' 正在刷…') : '现在刷一轮')) },
+          s && s.pauseReason ? h('div', { className: 'ab-note warn', style: { marginBottom: 8 } }, '今天先不动手了：' + s.pauseReason + '（明天自动恢复；要验证请看上方登录区的面板提示）') : null,
+          s ? h('div', { className: 'ab-muted ab-small', style: { marginBottom: 8 } },
+            '今天自动刷了 ' + s.runs + ' 轮 · 看了 ' + s.watched + ' · 赞 ' + s.like + ' · 评 ' + s.comment + ' · 关 ' + s.follow + ' · 私信 ' + s.dm + ' · 分享 ' + s.shareOwner + ' · 回你 ' + s.dmReply + ' · 签名 ' + (s.sign || 0) + ' · 昵称 ' + (s.nickname || 0) + ' · 头像 ' + (s.avatar || 0) +
+            (s.lastRun ? ' · 上次 ' + timeAgo(s.lastRun) : '') +
+            (s.nextDueAt ? ' · 下次 ' + timeAgo(s.nextDueAt) : '') +
+            (s.lastSkipReason ? ' · 上次跳过：' + s.lastSkipReason : '') +
+            '（手动刷不占轮数）') : null,
+          s && (s.lastSignText || s.lastNicknameText) ? h('div', { className: 'ab-muted ab-small', style: { marginBottom: 8 } },
+            (s.lastSignText ? '最近签名：' + s.lastSignText : '') +
+            (s.lastSignText && s.lastNicknameText ? ' · ' : '') +
+            (s.lastNicknameText ? '最近昵称：' + s.lastNicknameText : '')) : null,
+          !s ? h(Empty, { icon: '⏳', text: '加载中…' }) : s.history.length === 0 ? h(Empty, { icon: '📱', text: '还没刷过。先登录，再点「现在刷一轮」。' }) :
+            h('div', { className: 'ab-list' }, s.history.map((x, i) => h('div', { key: i, className: 'ab-li' },
+              h('div', { className: 'meta' }, timeAgo(x.at), h('br'), DOUYIN_KIND[x.kind] || x.kind),
+              h('div', { className: 'body' }, x.awemeId ? h('a', { href: 'https://www.douyin.com/video/' + x.awemeId, target: '_blank', rel: 'noreferrer' }, x.author ? x.author + ' 的视频' : x.awemeId) : h('b', null, x.author || x.secUid || ''), x.text ? h('div', { className: 'ab-muted' }, x.text) : null)))),
+        ),
+      )
+    }
+
     function ImageGen({ draft, setDraft }) {
       const f = useField(draft, setDraft)
       const c = draft.imageGen
@@ -2128,10 +2403,10 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const curTab = tabs.find((t) => t.id === tab) || tabs[0]
       const body = curTab.ext ? ExtPage : {
         overview: Overview, connect: Connect, persona: Persona, access: Access, group: Group, model: Model, voice: Voice,
-        stickers: Stickers, imagegen: ImageGen, diary: Diary, speakup: SpeakUp, mood: Mood, song: Song, bili: Bili, local: LocalApi, security: Security, modules: Modules, logs: Logs,
+        stickers: Stickers, imagegen: ImageGen, diary: Diary, speakup: SpeakUp, mood: Mood, song: Song, bili: Bili, douyin: Douyin, local: LocalApi, security: Security, modules: Modules, logs: Logs,
       }[curTab.id] || Overview
       // 哪些标签有没保存的改动
-      const TAB_KEYS = { connect: ['snowluma', 'botQQ'], access: ['ownerQQ', 'ownerName', 'ownerLevel', 'allow'], group: ['group', 'merge'], model: ['model'], voice: ['voice'], stickers: ['stickers'], imagegen: ['imageGen'], diary: ['diary', 'qzoneSocial'], speakup: ['speakUp'], mood: ['mood', 'memory'], song: ['song'], bili: ['bili'], local: ['local'], security: ['security'] }
+      const TAB_KEYS = { connect: ['snowluma', 'botQQ'], access: ['ownerQQ', 'ownerName', 'ownerLevel', 'longTasks', 'profilePerms', 'allow'], group: ['group', 'merge'], model: ['model', 'chatModels'], voice: ['voice'], stickers: ['stickers'], imagegen: ['imageGen'], diary: ['diary', 'qzoneSocial'], speakup: ['speakUp'], mood: ['mood', 'memory'], song: ['song'], bili: ['bili'], douyin: ['douyin'], local: ['local'], security: ['security'] }
       const tabDirty = (id) => {
         if (!dirty) return false
         if (id.startsWith('ext:')) { const k = id.slice(4); return JSON.stringify((draft.ext || {})[k]) !== JSON.stringify((cfg.ext || {})[k]) }

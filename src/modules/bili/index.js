@@ -3,16 +3,24 @@
 import { readFileSync } from 'node:fs'
 import { createBili } from '../../bili/duty.js'
 import { defineTool, str } from '../../tools/tools.js'
+import { profileToolVisible, profilePermits } from '../../chat/access.js'
+import { avatarSource } from '../profile/index.js'
 
 export default {
   id: 'bili',
   name: 'B站',
   version: '1.1.0',
-  description: '看别人发的 B 站视频；定时自己刷、评论、回评论；抽帧看画面、把截图发出来（bili_watch / bili_comment / qq_send_shot）',
+  description: '看别人发的 B 站视频；定时自己刷、评论、回评论；抽帧看画面、发截图；按权限改自己的头像 / 签名（bili_watch / bili_comment / qq_send_shot / bili_set_avatar / bili_set_sign）',
   tab: 'bili',
   files: ['bili/duty.js', 'bili/api.js', 'bili/vision.js', 'bili/shots.js'],
   setup(api) {
     const { hub } = api.core
+    const lastImage = new Map() // chatId → 最近一张图的网址（给 bili_set_avatar 的 last 用）
+    api.on('message', (msg) => {
+      const url = (msg.images || []).slice(-1)[0]?.data?.url
+      if (url && /^https?:\/\//i.test(url)) lastImage.set(msg.chatId, url)
+      return false
+    })
     const bili = createBili({ getConfig: api.config, hub, memory: api.lazy('memory'), log: api.log, dsh: api.dsh })
     api.every(60_000, () => bili.tick(), '刷B站')
 
@@ -53,6 +61,42 @@ export default {
           execute: async ({ query }) => bili.listShots(String(query || '')),
         }),
       ]
+    })
+
+    // 改 B 站头像 / 签名：权限在面板「权限」页（关 / 仅主人私聊 / 所有人），默认仅主人私聊
+    api.tool(({ chat, sessionId }) => {
+      const cfg = api.config()
+      if (!cfg.bili.enabled) return []
+      const tools = []
+      if (profileToolVisible(cfg, 'biliAvatar', chat)) tools.push(defineTool({
+        name: 'bili_set_avatar',
+        description: '换你自己 B 站账号的头像。image 填图片网址；填 last 就用这个聊天里刚才别人发的那张图（最大 2MB）。',
+        properties: { image: str('图片网址（http/https），或 last 表示刚才发的那张图') },
+        required: ['image'],
+        execute: async ({ image }) => {
+          const c = api.config()
+          if (!c.bili.enabled) return { ok: false, message: 'B 站没打开' }
+          const p = profilePermits(c, 'biliAvatar', chat, hub.turnSendersAllOwner(sessionId))
+          if (!p.ok) return p
+          const src = avatarSource(image, lastImage.get(hub.chatOfSession?.(sessionId) || chat.chatId))
+          if (!src.ok) return src
+          return bili.setAvatar(src.file)
+        },
+      }))
+      if (!profileToolVisible(cfg, 'biliSign', chat)) return tools
+      return [...tools, defineTool({
+        name: 'bili_set_sign',
+        description: '改你自己 B 站账号的个性签名（最多 70 字）。有人让你改 B 站签名时用。',
+        properties: { text: str('新的签名') },
+        required: ['text'],
+        execute: async ({ text }) => {
+          const c = api.config()
+          if (!c.bili.enabled) return { ok: false, message: 'B 站没打开' }
+          const p = profilePermits(c, 'biliSign', chat, hub.turnSendersAllOwner(sessionId))
+          if (!p.ok) return p
+          return bili.setSign(text)
+        },
+      })]
     })
 
     api.route('/bili/state', async () => ({ ok: true, ...bili.state(), account: await bili.account() }))

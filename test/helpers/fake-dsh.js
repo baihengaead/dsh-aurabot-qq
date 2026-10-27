@@ -40,6 +40,12 @@ export function createFakeDsh({ brain }) {
         },
         systemPrompt: { context: (c) => { contexts.set(c.name, c); return () => contexts.delete(c.name) } },
       },
+      steered: [],
+      // 假的 steer：记下来，并当作下一步输入（这里简化成排在当前这一轮之后再跑一轮）
+      steer(msg) {
+        agent.steered.push(msg)
+        return agent.followup(msg)
+      },
       followup(msg) {
         chain = chain.then(async () => {
           turn++
@@ -106,6 +112,8 @@ export function createFakeDsh({ brain }) {
       },
     },
     llm: {
+      listProviders: () => ['fake'],
+      async listModels() { return ['fake-1', 'm-pdef', 'm-gdef', 'm-owner', 'm-g777'].map((id) => ({ id, name: id })) },
       async *stream() {
         yield { type: 'text-delta', text: '可爱的小鲸鱼 #开心 #卖萌' }
         yield { type: 'finish', reason: { kind: 'stop' } }

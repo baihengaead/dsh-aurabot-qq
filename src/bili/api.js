@@ -1,6 +1,6 @@
 // B 站网页端接口：搜视频、看视频信息 / 字幕 / 评论、发评论、看别人的回复。
 // 登录靠用户在面板里填的 Cookie（SESSDATA、bili_jct）；部分接口要 WBI 签名，buvid3 没有就自己申请一个。
-// 只做看和评论，不碰改资料、关注、私信这类账号层面的操作。
+// 支持看、评论和修改自己的签名 / 头像；改资料的权限由模块层校验，不做关注、私信。
 
 import { createHash } from 'node:crypto'
 
@@ -42,6 +42,18 @@ export function findVideoId(text) {
 
 const stripHtml = (s) => String(s || '').replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'")
 
+const FACE_MAX = 2 * 1024 * 1024
+
+/** 有的图床（含 QQ multimedia.nt.qq.com）Content-Type 会给 application/octet-stream，按文件头认一下。 */
+export function sniffImageType(buf) {
+  const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf || [])
+  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png'
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg'
+  if (b.length >= 6 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'image/gif'
+  if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp'
+  return ''
+}
+
 export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
   let wbi = null // { img, sub, at }
   let buvid = ''
@@ -52,10 +64,12 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
     return Object.entries(c).map(([k, v]) => `${k}=${v}`).join('; ')
   }
 
-  async function req(url, { method = 'GET', form, timeoutMs = 20000 } = {}) {
+  async function req(url, { method = 'GET', form, multipart, timeoutMs = 20000 } = {}) {
     const headers = { 'user-agent': UA, referer: 'https://www.bilibili.com/', origin: 'https://www.bilibili.com', cookie: cookieHeader() }
     let body
-    if (form) {
+    if (multipart) {
+      body = multipart // FormData：content-type 带 boundary 由 fetch 自己填
+    } else if (form) {
       headers['content-type'] = 'application/x-www-form-urlencoded'
       body = new URLSearchParams(form).toString()
     }
@@ -140,7 +154,8 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
     }
   }
 
-  /** 字幕全文（优先中文；AI 字幕要登录才有）。拿不到返回 ''。 */  async function subtitle({ bvid, aid, cid }) {
+  /** 字幕全文（优先中文；AI 字幕要登录才有）。拿不到返回 ''。 */
+  async function subtitle({ bvid, aid, cid }) {
     try {
       const d = await req(await signed('https://api.bilibili.com/x/player/wbi/v2', { ...(bvid ? { bvid } : { aid }), cid }))
       const list = d.subtitle?.subtitles || []
@@ -177,6 +192,32 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
     await req('https://api.bilibili.com/x/web-interface/archive/like', { method: 'POST', form: { aid, like: 1, csrf } })
   }
 
+  /** 改自己的个性签名（B 站上限 70 字）。要登录。 */
+  async function setSign(sign) {
+    const csrf = parseCookie(getCookie()).bili_jct
+    if (!csrf) throw new Error('没登录 B 站（Cookie 里要有 bili_jct）')
+    await req('https://api.bilibili.com/x/member/web/sign/update', { method: 'POST', form: { user_sign: sign, csrf } })
+  }
+
+  /** 换头像：先把图片下载下来（≤2MB，只收图片），再按网页端的方式 multipart 上传。要登录。 */
+  async function setFace(imageUrl) {
+    const csrf = parseCookie(getCookie()).bili_jct
+    if (!csrf) throw new Error('没登录 B 站（Cookie 里要有 bili_jct）')
+    const r = await fetchImpl(imageUrl, { headers: { 'user-agent': UA }, signal: AbortSignal.timeout(20000) })
+    if (r.ok === false || (typeof r.status === 'number' && (r.status < 200 || r.status >= 300))) throw new Error('图片下载失败：HTTP ' + r.status)
+    let type = String(r.headers?.get?.('content-type') || '').split(';')[0].trim()
+    const buf = Buffer.from(await r.arrayBuffer())
+    if (!buf.length) throw new Error('图片是空的')
+    if (buf.length > FACE_MAX) throw new Error('图片超过 2MB，B 站不收')
+    if (!/^image\//i.test(type)) type = sniffImageType(buf)
+    if (!type) throw new Error('这个网址不是图片')
+    const fd = new FormData()
+    fd.append('dopost', 'save')
+    fd.append('DisplayRank', '10000')
+    fd.append('face', new Blob([buf], { type }), 'face.' + (type.split('/')[1] || 'jpg').replace(/[^a-z0-9]/gi, ''))
+    await req(`https://api.bilibili.com/x/member/web/face/update?csrf=${encodeURIComponent(csrf)}`, { method: 'POST', multipart: fd, timeoutMs: 30000 })
+  }
+
   /** 别人回复她的消息：[{id, time, name, mid, text, myText, oid, root, parent, title, uri}] */
   async function replyFeed() {
     const d = await req('https://api.bilibili.com/x/msgfeed/reply?platform=web&build=0&mobi_app=web')
@@ -193,5 +234,5 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
     return r.headers.get('location') || ''
   }
 
-  return { nav, search, popular, view, playurl, subtitle, comments, postComment, likeVideo, replyFeed, resolveShort }
+  return { nav, search, popular, view, playurl, subtitle, comments, postComment, likeVideo, setSign, setFace, replyFeed, resolveShort }
 }

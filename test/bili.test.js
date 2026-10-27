@@ -58,6 +58,7 @@ function fakes({ decisions, replyText = '是呀 我也觉得', cfgOver = {}, pos
     comments: async () => [{ name: '网友', text: '好香' }],
     postComment: async (aid, message, o) => { if (postError) { posted.push({ failed: true }); throw postError } posted.push({ aid, message, ...(o || {}) }); return { rpid: 1 } },
     likeVideo: async () => {},
+    setSign: async (sign) => { posted.push({ sign }) },
     replyFeed: async () => [{ id: 'f1', name: '路人甲', text: '你也爱吃米饭？', myText: '看饿了', oid: 1, root: 100, parent: 101, title: '米饭大赛', type: 1 }],
     resolveShort: async () => 'https://www.bilibili.com/video/BV1bbbbbbbbb',
   }
@@ -159,4 +160,79 @@ test('B 站 Cookie 分两个框填：纯值、带前缀、整串都认；老配�
   assert.equal(next.bili.cookie, 'SESSDATA=old1234; bili_jct=new0000', '只改一个，另一个保留')
   const cleared = mergeFromPanel(next, { bili: { sessdata: null, biliJct: null, cookie: null } })
   assert.equal(cleared.bili.cookie, '')
+})
+
+test('#6 改 B 站签名：发对接口和 csrf；超长 / 空 / 试运行 / 没登录都不发', async () => {
+  const reqs = []
+  const real = api.createBiliApi({ getCookie: () => 'SESSDATA=x; bili_jct=tok', log: { debug() {}, warn() {} }, fetchImpl: async (url, o) => { reqs.push({ url, ...o }); return { status: 200, json: async () => ({ code: 0, data: {} }) } } })
+  await real.setSign('今天也很开心')
+  assert.equal(reqs[0].url, 'https://api.bilibili.com/x/member/web/sign/update')
+  assert.equal(reqs[0].method, 'POST')
+  const form = new URLSearchParams(reqs[0].body)
+  assert.equal(form.get('user_sign'), '今天也很开心')
+  assert.equal(form.get('csrf'), 'tok')
+  await assert.rejects(api.createBiliApi({ getCookie: () => '', log: {} }).setSign('x'), /没登录/)
+
+  const { b, posted, events } = fakes({})
+  assert.equal((await b.setSign('')).ok, false)
+  assert.equal((await b.setSign('字'.repeat(71))).ok, false)
+  const r = await b.setSign('换个签名')
+  assert.equal(r.ok, true)
+  assert.deepEqual(posted, [{ sign: '换个签名' }])
+  assert.ok(events.some((e) => e.includes('B站签名')))
+
+  const cfgDry = normalize({ dryRun: true, bili: { enabled: true, cookie: 'bili_jct=y' } })
+  const sent = []
+  const bd = duty.createBili({ getConfig: () => cfgDry, hub: {}, log: { info() {}, warn() {}, debug() {} }, api: { setSign: async (s) => sent.push(s) } })
+  assert.match((await bd.setSign('试试')).message, /试运行/)
+  const cfgNo = normalize({ dryRun: false, bili: { enabled: true, cookie: '' } })
+  const bn = duty.createBili({ getConfig: () => cfgNo, hub: {}, log: { info() {}, warn() {}, debug() {} }, api: { setSign: async (s) => sent.push(s) } })
+  assert.equal((await bn.setSign('试试')).ok, false)
+  assert.equal(sent.length, 0)
+})
+
+test('#6 换 B 站头像：先下载图片再 multipart 上传到 face/update；超 2MB / 非图片 / 试运行 / 没登录都不发', async () => {
+  const reqs = []
+  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3])
+  const mk = (img) => async (url, o = {}) => {
+    reqs.push({ url, ...o })
+    if (/^https:\/\/(img\.example|multimedia\.nt\.qq\.com)\//.test(url)) return { ok: true, status: 200, headers: { get: () => img.type }, arrayBuffer: async () => img.buf }
+    return { ok: true, status: 200, json: async () => ({ code: 0, data: {} }) }
+  }
+  const real = api.createBiliApi({ getCookie: () => 'SESSDATA=x; bili_jct=tok', log: { debug() {}, warn() {} }, fetchImpl: mk({ type: 'image/png', buf: png.buffer }) })
+  await real.setFace('https://img.example/a.png')
+  const up = reqs[1]
+  assert.equal(up.url, 'https://api.bilibili.com/x/member/web/face/update?csrf=tok')
+  assert.equal(up.method, 'POST')
+  assert.ok(up.body instanceof FormData)
+  assert.equal(up.body.get('dopost'), 'save')
+  assert.equal(up.body.get('face').size, png.length)
+  assert.equal(up.body.get('face').type, 'image/png')
+  const big = api.createBiliApi({ getCookie: () => 'bili_jct=tok', log: {}, fetchImpl: mk({ type: 'image/jpeg', buf: new ArrayBuffer(2 * 1024 * 1024 + 1) }) })
+  await assert.rejects(big.setFace('https://img.example/b.jpg'), /2MB/)
+  const html = api.createBiliApi({ getCookie: () => 'bili_jct=tok', log: {}, fetchImpl: mk({ type: 'text/html', buf: new TextEncoder().encode('<html>hi</html>').buffer }) })
+  await assert.rejects(html.setFace('https://img.example/c'), /不是图片/)
+  // QQ 图床常回 application/octet-stream：按 PNG/JPEG/GIF/WebP 文件头认
+  const qq = api.createBiliApi({ getCookie: () => 'bili_jct=tok', log: {}, fetchImpl: mk({ type: 'application/octet-stream', buf: png.buffer }) })
+  reqs.length = 0
+  await qq.setFace('https://multimedia.nt.qq.com/v1/foo')
+  assert.equal(reqs[1].body.get('face').type, 'image/png')
+  assert.equal(api.sniffImageType(png), 'image/png')
+  assert.equal(api.sniffImageType(new Uint8Array([0xff, 0xd8, 0xff, 0x01])), 'image/jpeg')
+  assert.equal(api.sniffImageType(new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])), 'image/gif')
+  assert.equal(api.sniffImageType(new Uint8Array([0x52,0x49,0x46,0x46,0,0,0,0,0x57,0x45,0x42,0x50])), 'image/webp')
+  await assert.rejects(api.createBiliApi({ getCookie: () => '', log: {} }).setFace('https://img.example/a.png'), /没登录/)
+
+  const sent = []
+  const mkDuty = (cfg) => duty.createBili({ getConfig: () => cfg, hub: {}, log: { info() {}, warn() {}, debug() {} }, api: { setFace: async (f) => sent.push(f) } })
+  assert.match((await mkDuty(normalize({ dryRun: true, bili: { enabled: true, cookie: 'bili_jct=y' } })).setAvatar('https://x/a.png')).message, /试运行/)
+  assert.equal((await mkDuty(normalize({ dryRun: false, bili: { enabled: true, cookie: '' } })).setAvatar('https://x/a.png')).ok, false)
+  assert.equal((await mkDuty(normalize({ dryRun: false, bili: { enabled: true, cookie: 'bili_jct=y' } })).setAvatar('C:\\a.png')).ok, false)
+  assert.equal(sent.length, 0)
+  const ok = await mkDuty(normalize({ dryRun: false, bili: { enabled: true, cookie: 'bili_jct=y' } })).setAvatar('https://x/a.png')
+  assert.equal(ok.ok, true)
+  assert.deepEqual(sent, ['https://x/a.png'])
+  const { normalize: n2 } = await import('../src/core/config.js')
+  assert.equal(n2({}).profilePerms.biliAvatar, 'owner')
+  assert.equal(n2({ profilePerms: { biliAvatar: 'x' } }).profilePerms.biliAvatar, 'owner')
 })

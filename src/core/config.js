@@ -2,7 +2,8 @@
 
 import { dataDir, readJson, writeJson } from './store.js'
 import { DEFAULT_GROUP_POLICY } from '../chat/group-policy.js'
-import { LEVELS } from '../chat/access.js'
+import { LEVELS, PROFILE_PERM_KEYS, PROFILE_PERM_LEVELS, profilePermDefault } from '../chat/access.js'
+import { normalizeChatModels } from '../chat/chat-model.js'
 
 export const DEFAULTS = {
   enabled: false, // 总开关：关着一句都不发
@@ -18,6 +19,8 @@ export const DEFAULTS = {
   ownerQQ: '', // 主人 QQ 号（向导里填）
   ownerName: '主人',
   ownerLevel: 'full', // full | social | chat
+  profilePerms: { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', biliSign: 'owner', biliAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner', douyinBrowse: 'owner', douyinLike: 'owner', douyinComment: 'owner', douyinReplyComment: 'owner', douyinFollow: 'owner', douyinDm: 'owner', douyinShareOwner: 'owner', douyinReplyOwnerDm: 'owner', douyinSign: 'owner', douyinNickname: 'owner', douyinAvatar: 'owner' }, // 改资料类操作（含抖音浏览/互动/改资料）的权限：off 关 / owner 仅主人私聊 / all 所有人。抖音项默认仅主人，总开关默认关
+  longTasks: false, // 长任务模式：主人私聊（完整权限）额外挂 dsh-tool-jobs + dsh-tool-schedule，会多一点工具定义、稍慢
   allow: { private: [], groups: [] }, // 主人永远能私聊，不用写进白名单
   snowluma: {
     dir: 'C:\\Aurabot\\snowluma', // 主人自己下载解压到这里（EULA 不允许自动部署）
@@ -32,6 +35,8 @@ export const DEFAULTS = {
     wsToken: '',
   },
   model: { provider: '', model: '', reasoningEffort: 'low', vision: 'auto' }, // 留空 = 跟随 DSH 默认；vision: auto/on/off
+  // 按聊天选模型：单个私聊 / 群 > 对应类型默认 > 全局模型；没写或不可用就退到下一级
+  chatModels: { privateDefault: { provider: '', model: '', reasoningEffort: '' }, groupDefault: { provider: '', model: '', reasoningEffort: '' }, privates: {}, groups: {} },
   merge: { enabled: true, waitSec: 2.5, maxSec: 8, groupWaitSec: 5, groupMaxSec: 15 }, // 连发合并：对方停顿 waitSec 秒再一起回，最多等 maxSec 秒；群里等得久一点，把一段话攒齐
   imageGen: {
     enabled: false,
@@ -119,6 +124,30 @@ export const DEFAULTS = {
     ffmpegPath: '', // 留空自动找（PATH / 常见安装位置）
     shotChance: 0.35, // 刷完顺手发一张截图的概率（跟发一张表情包一个量级，0 = 从不）
     shotLibrary: 300, // 截图库最多存多少张，超了自动删最旧的
+  },
+  // 刷抖音：用专用的 Edge 窗口（独立登录资料，不碰你平时的浏览器），经 CDP 控制。浏览/互动/改资料各项权限在 profilePerms.douyin*。
+  douyin: {
+    enabled: false, // 总开关：默认关，先在面板里登录抖音再打开
+    autoBrowse: true, // 定时自己去刷
+    intervalHours: 4,
+    maxRunsPerDay: 3,
+    perRun: 5, // 一轮看几个视频
+    maxWatchPerDay: 30, // 每天最多看几个（手动让她刷也算）
+    dwellMin: 8, // 每个视频停留的秒数（随机取一个）
+    dwellMax: 40,
+    browserPath: '', // 留空 = 自动找 Edge（找不到再找 Chrome）；也可填 msedge.exe 的完整路径
+    minimize: true, // 登录完把窗口最小化
+    dmPollMinutes: 7, // 看私信的频率（分钟，实际在 0.7~1.4 倍之间随机）
+    replyPollMinutes: 25, // 看别人回她评论的频率（分钟）
+    owner: { input: '', secUid: '', uid: '', nickname: '', avatar: '', confirmedInput: '' }, // 主人抖音；secUid/uid 由「核对」写入，面板不能直接改
+    socialInterruptBrowse: true, // 社交（私信/分享）进行中时打断刷流，原因写入 lastSkipReason
+    shareBias: 'proactive', // stingy|normal|proactive：刷流 think 里 share 的倾向（默认积极推给主人）
+    caps: { like: 30, comment: 3, replyComment: 6, follow: 5, dm: 5, shareOwner: 5, dmReply: 20, sign: 2, nickname: 2, avatar: 1 }, // 每天上限（登录后前 3 天减半；改资料三项仅工具）
+    gate: {
+      maxWritesPerDay: 60, // 所有写操作合计上限
+      minWriteGapSec: 20, // 任意两次写操作之间至少隔这么多秒
+      newAccountDays: 3, // 首次登录起这么多天内，单项上限和总写次数都减半
+    },
   },
   qzoneSocial: {
     enabled: true,
@@ -210,6 +239,9 @@ export function normalize(raw) {
   c.model.vision = c.model.vision === 'on' || c.model.vision === 'off' ? c.model.vision : 'auto'
   c.setupDone = bool(c.setupDone, false)
   c.ownerLevel = LEVELS.includes(c.ownerLevel) ? c.ownerLevel : 'full'
+  c.longTasks = bool(c.longTasks, false)
+  c.chatModels = normalizeChatModels(c.chatModels)
+  c.profilePerms = Object.fromEntries(PROFILE_PERM_KEYS.map((k) => [k, PROFILE_PERM_LEVELS.includes(c.profilePerms?.[k]) ? c.profilePerms[k] : profilePermDefault(k)]))
   c.allow = { private: qqList(c.allow.private), groups: qqList(c.allow.groups) }
   const g = c.group
   // 主人私聊里的「群里发生了什么」：开关、每个群给几条（1~30）、只取哪些群（空 = 全部）
@@ -270,6 +302,34 @@ export function normalize(raw) {
   b.maxCommentsPerDay = num(b.maxCommentsPerDay, 3, 0, 50)
   b.maxRepliesPerDay = num(b.maxRepliesPerDay, 6, 0, 100)
   b.keywords = (Array.isArray(b.keywords) ? b.keywords : String(b.keywords || '').split(/[\n,，]+/)).map((x) => String(x).trim()).filter(Boolean).slice(0, 30)
+  const d = c.douyin
+  d.enabled = bool(d.enabled, false)
+  d.autoBrowse = bool(d.autoBrowse, true)
+  d.minimize = bool(d.minimize, true)
+  d.socialInterruptBrowse = bool(d.socialInterruptBrowse, true)
+  d.intervalHours = num(d.intervalHours, 4, 1, 48)
+  d.maxRunsPerDay = num(d.maxRunsPerDay, 3, 0, 24)
+  d.perRun = num(d.perRun, 5, 1, 10)
+  d.maxWatchPerDay = num(d.maxWatchPerDay, 30, 0, 200)
+  d.dwellMin = num(d.dwellMin, 8, 3, 120)
+  d.dwellMax = Math.max(d.dwellMin, num(d.dwellMax, 40, 3, 300))
+  d.dmPollMinutes = num(d.dmPollMinutes, 7, 2, 120)
+  d.replyPollMinutes = num(d.replyPollMinutes, 25, 5, 240)
+  d.browserPath = String(d.browserPath || '').trim()
+  if (!isObj(d.owner)) d.owner = {}
+  for (const k of ['input', 'secUid', 'uid', 'nickname', 'avatar', 'confirmedInput']) d.owner[k] = String(d.owner[k] ?? '').trim().slice(0, 400)
+  if (!isObj(d.caps)) d.caps = {}
+  {
+    const rawBias = String(d.shareBias || 'proactive').toLowerCase()
+    d.shareBias = rawBias === 'off' || rawBias === 'stingy' ? 'stingy'
+      : rawBias === 'normal' ? 'normal'
+      : 'proactive'
+  }
+  for (const [k, dv, max] of [['like', 30, 300], ['comment', 3, 30], ['replyComment', 6, 60], ['follow', 5, 50], ['dm', 5, 30], ['shareOwner', 5, 30], ['dmReply', 20, 200], ['sign', 2, 20], ['nickname', 2, 20], ['avatar', 1, 10]]) d.caps[k] = num(d.caps[k], dv, 0, max)
+  if (!isObj(d.gate)) d.gate = {}
+  d.gate.maxWritesPerDay = num(d.gate.maxWritesPerDay, 60, 1, 500)
+  d.gate.minWriteGapSec = num(d.gate.minWriteGapSec, 20, 0, 600)
+  d.gate.newAccountDays = num(d.gate.newAccountDays, 3, 0, 30)
   delete c.mood.maxInjectPerDay // 旧版的「每天最多提醒几次」，现在心情明显时每轮都会带上
   c.snowluma.webuiPort = num(c.snowluma.webuiPort, 5099, 1, 65535)
   // 老配置只有一个 consolidateAt：换成两个时间点（它 + 12 小时后）
@@ -399,7 +459,7 @@ export function splitBiliCookie({ sessdata = '', biliJct = '', cookie = '' } = {
 const FILE = () => dataDir('config.json')
 
 /** 在某次更新里新增、会替她公开发东西的功能。以后再加这类功能，把配置键名加到这里。 */
-export const OPT_IN_ON_UPDATE = ['qzoneSocial', 'bili']
+export const OPT_IN_ON_UPDATE = ['qzoneSocial', 'bili', 'douyin']
 
 export function loadConfig() {
   const raw = readJson(FILE(), {})
@@ -445,11 +505,18 @@ export function mergeFromPanel(current, incoming) {
     delete p[`${k}Set`]
     delete p[`${k}Hint`]
   }
+  // 主人的抖音 secUid / 昵称 / 头像只能由「核对」路由写入，面板存配置时保留原值
+  if (!next.douyin) next.douyin = {}
+  if (!next.douyin.owner) next.douyin.owner = {}
+  for (const k of ['secUid', 'uid', 'nickname', 'avatar', 'confirmedInput']) next.douyin.owner[k] = current.douyin?.owner?.[k] ?? ''
   // 联动密钥只由插件生成，面板不能改
   next.bridge.token = current.bridge?.token || ''
   // B 站：只改了其中一个值时，另一个保留；整串粘进来的会在 normalize 里拆开
   if (incoming?.bili && (incoming.bili.sessdata || incoming.bili.biliJct)) next.bili.cookie = ''
   if (incoming?.group?.overrides) next.group.overrides = incoming.group.overrides
+  // 按聊天选模型：两张表整张替换（deepMerge 会让删掉的条目又回来）
+  if (incoming?.chatModels?.privates) next.chatModels.privates = incoming.chatModels.privates
+  if (incoming?.chatModels?.groups) next.chatModels.groups = incoming.chatModels.groups
   if (incoming?.allow) next.allow = { ...current.allow, ...incoming.allow }
   return normalize(next)
 }

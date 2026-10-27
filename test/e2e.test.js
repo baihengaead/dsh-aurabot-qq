@@ -35,6 +35,10 @@ async function brain({ preset, text, images, callTool }) {
   if (/^【私聊/.test(text) && text.includes('表情改名测试')) { const m = text.match(/把「(.+?)」/); const r = await callTool('qq_edit_sticker', { sticker: m[1], new_name: '改过的名字', tags: ['开心'] }); return r.message }
   if (/^【私聊/.test(text) && text.includes('表情删除测试')) { const r = await callTool('qq_edit_sticker', { sticker: '改过的名字', delete: true }); return r.message }
   if (/^【私聊/.test(text) && text.includes('翻聊天记录')) { const r = await callTool('qq_chat_history', { count: 5 }); return r.message.split('\n')[0] }
+  if (text.includes('改昵称测试')) { const r = await callTool('qq_set_nickname', { name: '小鲸鱼' }); return r ? r.message : '没这个工具' }
+  if (text.includes('改签名测试')) { const r = await callTool('qq_set_signature', { text: '今天也要开心' }); return r ? r.message : '没这个工具' }
+  if (text.includes('换头像测试')) { const r = await callTool('qq_set_avatar', { image: 'https://example.com/a.png' }); return r ? r.message : '没这个工具' }
+  if (text.includes('本地头像测试')) { const r = await callTool('qq_set_avatar', { image: 'C:/Users/a/secret.png' }); return r ? r.message : '没这个工具' }
   if (text.includes('慢慢想') && !text.includes('补充')) { await sleep(2500); return '想好了' }
   if (text.includes('引用测试') && text.startsWith('【群聊')) { const n = (text.match(/\[(\d+)\][^\n]*引用测试/) || [])[1]; return n ? `<reply:${n}>收到这条啦\n别的我就不挨个回了` : '没看到编号' }
   if (text.includes('第一句') && text.includes('第二句')) return '两句我都看到啦'
@@ -44,6 +48,8 @@ async function brain({ preset, text, images, callTool }) {
     const r = await callTool('qq_group_admin', { action: 'ban', user_id: '999', minutes: 5 })
     return r && r.ok ? '好 禁了' : '你谁啊 我只听主人的'
   }
+  if (text.includes('跑个慢任务')) { await new Promise((r) => setTimeout(r, 1500)); return '慢任务跑完了' }
+  if (text.includes('改成快的')) return '好 改成快的'
   if (text.includes('语音说你好')) return '你好呀'
   if (text.includes('晚安')) return '<voice>晚安啦 做个好梦</voice>'
   if (text.includes('没人叫你')) return '[沉默]'
@@ -121,6 +127,18 @@ test('主人私聊「在吗」：建会话（完整权限 preset）、按 ||| �
   const agent = fake.agents.get(ws.sessionIds[0])
   assert.ok(agent.tools.has('qq_send_qzone'))
   assert.ok(agent.tools.has('qq_group_admin'))
+})
+
+test('#7 主人私聊：她这一轮还在跑时再发消息，直接 steer 进去，不等整轮结束', async () => {
+  const agent = fake.agents.get(fake.workspaces[0].sessionIds[0])
+  const before = agent.steered.length
+  mock.push(priv(OWNER, text('跑个慢任务')))
+  await new Promise((r) => setTimeout(r, 700)) // 过了合并等待，这一轮已经在跑
+  mock.push(priv(OWNER, text('改成快的')))
+  await until(() => agent.steered.length > before)
+  const steered = agent.steered.at(-1).content.filter((c) => c.type === 'text').map((c) => c.text).join('')
+  assert.match(steered, /改成快的/)
+  await until(() => sentTo('private', OWNER).some((c) => c.params.message[0].data.text === '好 改成快的'))
 })
 
 test('不在白名单的私聊：不理', async () => {
@@ -563,4 +581,47 @@ test('翻聊天记录：读当前聊天更早的消息', async () => {
   mock.push(priv(OWNER, text('翻聊天记录看看')))
   await until(() => fake.turns.at(-1)?.userText.includes('翻聊天记录') && fake.turns.at(-1).toolCalls.length)
   assert.match(fake.turns.at(-1).toolCalls[0].result.message, /老张：上周说好去吃火锅/)
+})
+
+const lastCall = (word) => until(() => { const t = fake.turns.at(-1); return t?.userText.includes(word) && t.toolCalls.length ? t.toolCalls[0] : null })
+
+test('#6 改资料：默认仅主人私聊，昵称 / 签名 / 头像走 SnowLuma 对应动作', async () => {
+  mock.push(priv(OWNER, text('改昵称测试')))
+  let c = await lastCall('改昵称测试')
+  assert.equal(c.result.ok, true)
+  assert.deepEqual(mock.sent('set_qq_profile').at(-1).params, { nickname: '小鲸鱼' })
+  mock.push(priv(OWNER, text('改签名测试')))
+  c = await lastCall('改签名测试')
+  assert.equal(c.result.ok, true)
+  assert.deepEqual(mock.sent('set_self_longnick').at(-1).params, { longNick: '今天也要开心' })
+  mock.push(priv(OWNER, text('换头像测试')))
+  c = await lastCall('换头像测试')
+  assert.equal(c.result.ok, true)
+  assert.equal(mock.sent('set_qq_avatar').at(-1).params.file, 'https://example.com/a.png')
+  const n = mock.sent('set_qq_avatar').length
+  mock.push(priv(OWNER, text('本地头像测试')))
+  c = await lastCall('本地头像测试')
+  assert.equal(c.result.ok, false, '本地路径不收')
+  assert.equal(mock.sent('set_qq_avatar').length, n)
+})
+
+test('#6 改资料：群里默认没有这些工具；调成「所有人」后群友也能改；「关」了谁都不行', async () => {
+  const n = mock.sent('set_qq_profile').length
+  mock.push(grp('555', OWNER, [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' 改昵称测试一' } }], 'xiaoming'))
+  let c = await lastCall('改昵称测试一')
+  assert.equal(c.result.message, 'no such tool')
+  assert.equal(mock.sent('set_qq_profile').length, n)
+
+  await fake.call('/save', { profilePerms: { qqNickname: 'all' } })
+  mock.push(grp('555', '777', [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' 改昵称测试二' } }]))
+  c = await lastCall('改昵称测试二')
+  assert.equal(c.result.ok, true)
+  assert.equal(mock.sent('set_qq_profile').length, n + 1)
+
+  await fake.call('/save', { profilePerms: { qqNickname: 'off' } })
+  mock.push(priv(OWNER, text('改昵称测试三')))
+  c = await lastCall('改昵称测试三')
+  assert.equal(c.result.message, 'no such tool')
+  assert.equal(mock.sent('set_qq_profile').length, n + 1)
+  await fake.call('/save', { profilePerms: { qqNickname: 'owner' } })
 })

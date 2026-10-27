@@ -196,7 +196,7 @@ export default {
 | `prompt` | `content, { chat, senderId, queryText }` | **交给她的内容**：`[{ type: 'text', text }, { type: 'image', … }]`。可以加背景信息、改格式、去掉图片；返回 `null` 这次不交给她 |
 | `reply/items` | `items, { chatId, text, userText }` | 她的回复**拆好之后**（哪条发语音、配不配表情都已经决定了）：每条 `{ kind: 'text' \| 'voice' \| 'sticker' \| 'poke' \| 'image', value, replyTo }`。可以改顺序、全部变语音、去掉表情、加图片 |
 | `send` | `message, { chatId, note, force }` | **最终发给 QQ 的消息段**（OneBot 格式）。所有发出去的消息都经过这里：她的回复、命令回复、模块发的。加签名、过滤词、抄送到别处都在这里 |
-| `model` | `selection, chat` | **这个聊天用哪个模型**（同步，不能 async）：返回 `{ provider, model, reasoningEffort }`。比如群里用便宜的、私聊用好的。`selection` 是面板选的（没选时是 DSH 默认，拿不到时是 `null`）。换了之后从这个聊天的下一条消息起生效 |
+| `model` | `selection, chat` | **这个聊天用哪个模型**（同步，不能 async）：返回 `{ provider, model, reasoningEffort }`。比如群里用便宜的、私聊用好的。`selection` 是面板选的（没选时是 DSH 默认，拿不到时是 `null`），主人在面板里「按聊天选模型」设过的话，已经按那个聊天算好了；模块在它之后还可以再改。换了之后从这个聊天的下一条消息起生效 |
 | `persona` | `text` | **她的人格**全文（同步）：返回新文字就换掉 |
 | `rules` | `text, kind` | **她的规则**全文（同步，kind 是 `private` / `social`） |
 
@@ -266,7 +266,7 @@ api.tool(({ chat, level, sessionId }) => {
 ## 面板
 
 **自动表单**：写了 `settings`，面板会多一个这个模块的标签页，自动生成设置表单，用户改完点保存。
-定义里写了 `tab: '内置标签页'`（`voice` `stickers` `imagegen` `diary` `speakup` `mood` `song` `bili` `local` `group` `model` `persona` `access` `connect` `overview`），设置和面板就放进那一页的最下面，不单独占一页。比如给翻唱加功能的模块写 `tab: 'song'`。
+定义里写了 `tab: '内置标签页'`（`voice` `stickers` `imagegen` `diary` `speakup` `mood` `song` `bili` `douyin` `local` `group` `model` `persona` `access` `connect` `overview`），设置和面板就放进那一页的最下面，不单独占一页。比如给翻唱加功能的模块写 `tab: 'song'`。
 
 ```js
 settings: [
@@ -315,6 +315,7 @@ return function Panel({ settings, save, toast }) {
 | `qzone-social` | 空间互动 | `run({ force })` `state()` |
 | `speakup` | 主动搭话 | `fire(原因)` `state()` |
 | `bili` | B 站 | `watch(链接)` `comment(链接, 文字)` `run()` `checkReplies()` `account()` `state()` |
+| `douyin` | 刷抖音 | `watch` `likeVideo` `commentVideo` `followUser` `dmTo` `shareToOwner` `run` `checkOwnerDms` `checkCommentReplies` `confirmOwner` `account` `state`；工具 `douyin_watch` / `douyin_like` / `douyin_comment` / `douyin_follow` / `douyin_dm` / `douyin_share`（关注仅工具，刷流不自动关注） |
 | `song` | 翻唱 | `request({ song, pitch, chatId })` `search(关键词)` `status()` `install()` |
 
 聊天中枢需要的时候会去找 `stickers`（发表情、偷表情）、`voice`（发语音）、`mood`（心情影响表情 / 语音频率）、`memory`（群聊插话判断）。
