@@ -1,8 +1,9 @@
-// 内置模块：生图。她能画图发到聊天里（OpenAI 兼容的生图服务，或「本地接口」里接的 SD WebUI / ComfyUI）。
+// 内置模块：生图。她能画图发到聊天里（OpenAI 兼容的生图服务、自定义接口、ChatGPT 订阅，或「本地接口」里的 SD WebUI / ComfyUI）。
 
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createImageGen } from '../../features/imagegen.js'
+import { listPaintings, openPaintFolder, paintingPath, removePainting } from '../../features/paintings.js'
 import { defineTool, str } from '../../tools/tools.js'
 import { dataDir } from '../../core/store.js'
 import { mimeOf } from '../../chat/inbound.js'
@@ -60,6 +61,24 @@ export default {
     })
     api.route('/image/codex/cancel', async () => ({ ok: true, ...auth.cancelLogin('已取消') }))
     api.route('/image/codex/logout', async () => ({ ok: true, ...auth.logout() }))
+
+    // 她的画作：面板底下那个图库（直接读存图目录，不单独维护索引）
+    api.route('/image/gallery', async (req) => {
+      const q = api.core.http.query(req)
+      const limit = q && q.limit ? Number(q.limit) : api.config().imageGen.galleryShown
+      return { ok: true, ...listPaintings({ limit }), dir: dataDir('imagegen') }
+    })
+    api.route('/image/gallery/image', async (req, res) => {
+      const p = paintingPath(api.core.http.query(req).file)
+      if (!p) return api.core.http.send(res, 404, '')
+      const buf = readFileSync(p)
+      api.core.http.send(res, 200, buf, String(mimeOf(buf) || 'image/png'))
+    })
+    api.route('/image/gallery/delete', async (req) => {
+      const b = await api.core.http.body(req).catch(() => ({}))
+      return removePainting(String((b && b.file) || ''))
+    })
+    api.route('/image/open-folder', async () => openPaintFolder())
 
     api.tool(({ chat, sessionId }) => (gen.enabled() && chat.kind !== 'system' ? defineTool({
       name: 'qq_draw_image',

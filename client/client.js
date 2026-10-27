@@ -2200,6 +2200,49 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       )
     }
 
+    /** 「她的画作」：读存图目录里最近的 N 张，可以单张删除、开文件夹。 */
+    function PaintGallery({ draft, setDraft }) {
+      const f = useField(draft, setDraft)
+      const shown = Math.min(50, Math.max(1, Number(draft.imageGen && draft.imageGen.galleryShown) || 20))
+      const [data, setData] = useState(null)
+      const load = async () => {
+        const r = await get('/image/gallery?limit=' + shown).catch(() => null)
+        setData(r && r.ok ? r : { items: [], total: 0, dir: '' })
+      }
+      useEffect(() => { load() }, [shown])
+      const del = async (file) => {
+        if (!confirm('删掉这张画？\n' + file)) return
+        const r = await post('/image/gallery/delete', { file }).catch(() => ({ ok: false }))
+        toast(r.message || (r.ok ? '删掉了' : '删除失败'), r.ok ? 'ok' : 'err')
+        load()
+      }
+      return h(Card, {
+        title: '她的画作' + (data ? '（显示最近 ' + data.items.length + ' 张 / 共 ' + data.total + ' 张）' : ''),
+        desc: '她画过的图都存在本机（不会自动删），这里只是面板里显示多少张。想看全部或者清理，点「打开文件夹」。',
+        right: h('div', { className: 'ab-flex' },
+          h(Btn, { small: true, kind: 'ghost', onClick: load }, '刷新'),
+          h(Btn, { small: true, kind: 'ghost', onClick: () => post('/image/open-folder').then((r) => toast(r.message, r.ok ? 'ok' : 'err')).catch(() => toast('打不开文件夹', 'err')) }, '打开文件夹')),
+      },
+        h(Row, { label: '面板显示最近', hint: '最多 50 张；只影响面板显示，不删文件' },
+          f.num('imageGen.galleryShown', { min: 1, max: 50 }), h('span', { className: 'ab-muted' }, '张')),
+        data && data.dir ? h('div', { className: 'ab-muted ab-small', style: { margin: '4px 0 8px', wordBreak: 'break-all' } }, '存图目录：' + data.dir) : null,
+        !data ? h(Empty, { icon: '⏳', text: '加载中…' })
+          : data.items.length === 0 ? h(Empty, { icon: '🎨', text: '她还没画过图。在聊天里说「画一张……」，画好的图会出现在这里。' })
+            : h('div', { className: 'ab-shots' }, data.items.map((it) => h(PaintCell, { key: it.file, it, onDelete: () => del(it.file) }))),
+      )
+    }
+
+    function PaintCell({ it, onDelete }) {
+      const src = API + '/image/gallery/image?file=' + encodeURIComponent(it.file)
+      const cap = it.prompt ? '「' + it.prompt + '」' : '画作'
+      const when = it.at ? timeAgo(it.at) : ''
+      return h('div', { className: 'ab-shot' },
+        h('a', { href: src, target: '_blank', rel: 'noreferrer' }, h('img', { src, alt: cap, loading: 'lazy' })),
+        h('div', { className: 'cap', title: cap }, cap + (when ? '　' + when : '')),
+        h('button', { type: 'button', className: 'ab-btn sm danger x', title: '删除', onClick: onDelete }, '✕'),
+      )
+    }
+
     function ImageGen({ draft, setDraft }) {
       const f = useField(draft, setDraft)
       const c = draft.imageGen
@@ -2275,6 +2318,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           isCustom ? h('div', { className: 'ab-note', style: { marginTop: 10 } }, '例子：地址填 https://image.pollinations.ai/prompt/{prompt}，再加 model=flux-anime、width=1080、height=1920、nologo=true 四个参数，GET 就会请求 …/prompt/<提示词>?model=flux-anime&width=1080&…') : null,
           !c.enabled ? h('div', { className: 'ab-note', style: { marginTop: 10 } }, '还没开启。填好接口信息、打开右上角开关并保存后，她就会多一个「画图」能力。') : null,
         ),
+        h(PaintGallery, { draft, setDraft }),
       )
     }
 

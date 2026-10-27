@@ -56,6 +56,8 @@ export const DEFAULTS = {
     },
     // 画面比例：her = 让她按画面自己定（提示词里带构图描述）；也可以钉死成方图/竖图/横图/宽幅
     shape: 'her',
+    // 面板「她的画作」里最多显示几张（图本身一直存着，插件不自动删）
+    galleryShown: 20,
     baseUrl: '',
     apiKey: '',
     model: '',
@@ -385,6 +387,7 @@ export function normalize(raw) {
   igx.background = ['auto', 'transparent', 'opaque'].includes(igx.background) ? igx.background : 'auto'
   // 画面比例：her = 她按画面自己定；其余钉死
   c.imageGen.shape = ['her', 'square', 'portrait', 'landscape', 'wide'].includes(c.imageGen.shape) ? c.imageGen.shape : 'her'
+  c.imageGen.galleryShown = Math.min(50, Math.max(1, Math.round(Number(c.imageGen.galleryShown) || 20)))
   if (!c.imageGen.custom || typeof c.imageGen.custom !== 'object') c.imageGen.custom = { ...DEFAULTS.imageGen.custom }
   const igc = c.imageGen.custom
   igc.method = String(igc.method || 'GET').toUpperCase() === 'POST' ? 'POST' : 'GET'
