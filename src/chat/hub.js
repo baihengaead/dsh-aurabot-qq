@@ -61,21 +61,49 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   const groupInterjects = new Map() // groupId → [t]  她主动开口（插话、接话）的时间
   const groupSaid = new Map() // groupId → [t]  她每次在群里说话的时间（刹车用）
   const groupFedAt = new Map() // groupId → 上次把群消息交给她的时间
-  // 「她挑」模式：这一轮收到的表情先按会话记着，她想收时凭编号来取（10 分钟有效）
+  // 「她挑」模式：这一轮收到的表情先按会话记着，她想收时凭编号来取。
+  // 落盘存一份 —— 只在内存里的话，DSH 一重启就什么都没有了，她只好绕路（拷附件 + qq_add_sticker）。
   const stickerStash = new Map() // chatId → { at, segs: [seg] }
+  const STICKER_TTL = 30 * 60_000 // 和「最近图片」一个尺度
+  const stashFile = () => dataDir('sticker-stash.json')
+  let stashLoaded = false
+
+  function loadStash () {
+    if (stashLoaded) return
+    stashLoaded = true
+    try {
+      const raw = readJson(stashFile(), () => ({}))
+      const now = Date.now()
+      for (const [chatId, v] of Object.entries(raw && typeof raw === 'object' ? raw : {})) {
+        if (v && Array.isArray(v.segs) && v.segs.length && now - Number(v.at || 0) < STICKER_TTL) {
+          stickerStash.set(chatId, { at: Number(v.at) || now, segs: v.segs })
+        }
+      }
+    } catch (error) {}
+  }
+
+  function saveStash () {
+    const now = Date.now()
+    const out = {}
+    for (const [chatId, v] of stickerStash) if (v && now - v.at < STICKER_TTL) out[chatId] = v
+    try { writeJson(stashFile(), out) } catch (error) {}
+  }
 
   /** 记下这一轮收到的表情，返回张数。 */
   function rememberStickers (chatId, segs) {
+    loadStash()
     const list = (segs || []).slice(0, 4)
     if (!list.length) return 0
     stickerStash.set(chatId, { at: Date.now(), segs: list })
+    saveStash()
     return list.length
   }
 
   /** 取第 index 张（从 1 开始）。过期或没有就返回 null。 */
   function stickerOf (chatId, index) {
+    loadStash()
     const s = stickerStash.get(chatId)
-    if (!s || Date.now() - s.at > 10 * 60_000) return null
+    if (!s || Date.now() - s.at > STICKER_TTL) return null
     const i = Number(index) - 1
     return Number.isInteger(i) && i >= 0 && i < s.segs.length ? s.segs[i] : null
   }

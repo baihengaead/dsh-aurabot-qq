@@ -68,6 +68,11 @@ test('她挑：没让她收就不收，但会收到提示', async () => {
   const t = fake.turns.at(-1)
   assert.match(String(t.userText), /qq_collect_sticker/, '应该给她一句"喜欢就收"的提示')
   assert.equal(library().length, 0, '她没说要收，库里应该还是空的')
+  // 表情暂存要落盘：只在内存里的话，DSH 一重启她就收不了了（真实踩过）
+  const stashFile = join(dataDir, 'sticker-stash.json')
+  assert.ok(existsSync(stashFile), 'sticker-stash.json 应该写出来')
+  const stash = JSON.parse(readFileSync(stashFile, 'utf8'))
+  assert.ok(stash['private:10000001']?.segs?.length, '暂存里应该有这个聊天的表情')
 })
 
 test('她挑：她调了工具才真的收下，而且名字是她给的', async () => {

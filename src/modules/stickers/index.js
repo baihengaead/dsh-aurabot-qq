@@ -80,7 +80,7 @@ export default {
         required: [],
         execute: async ({ index, name, tags }) => {
           const seg = hub.stickerOf(chat.chatId, index || 1)
-          if (!seg) return { ok: false, message: '这张表情已经拿不到了（太久了，或者这一轮里没有这张）' }
+          if (!seg) return { ok: false, message: '这张表情已经拿不到了（超过 30 分钟，或者这一轮里没有这张）' }
           const r = await store.saveFromSegment(seg, {
             name: String(name || '').trim().slice(0, 12),
             tags: Array.isArray(tags) ? tags.slice(0, 3) : [],
