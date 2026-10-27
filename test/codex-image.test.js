@@ -1,8 +1,9 @@
-// ChatGPT 订阅生图：OAuth 纯函数 + 令牌刷新 + 生图请求形状（全部用假 fetch，不联网）
+// ChatGPT 订阅生图：OAuth（Sign in with ChatGPT 动态客户端流程）+ 令牌刷新 + 生图请求形状
+// 全部用假 fetch，不联网。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -16,6 +17,8 @@ const { normalize } = await import('../src/core/config.js')
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64)])
 const b64 = PNG.toString('base64')
+const silent = { info () {}, warn () {}, debug () {}, error () {} }
+const CALLBACK = 'http://127.0.0.1:1455/auth/callback'
 
 /** 造一个带 chatgpt_account_id / email 的 JWT（不验签，只需要 payload） */
 function fakeJwt (payload) {
@@ -23,7 +26,18 @@ function fakeJwt (payload) {
   return `${enc({ alg: 'none' })}.${enc(payload)}.sig`
 }
 
-const silent = { info () {}, warn () {}, debug () {}, error () {} }
+/** 令牌响应（新流程必须带 scope，且含 chatgpt.tokens.use.direct） */
+function tokenJson (overrides = {}) {
+  const access = overrides.access_token || fakeJwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acc-1' } })
+  return {
+    access_token: access,
+    refresh_token: 'rt-1',
+    id_token: fakeJwt({ email: 'me@example.com' }),
+    expires_in: 3600,
+    scope: 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct',
+    ...overrides,
+  }
+}
 
 test('PKCE：challenge 是 verifier 的 sha256(base64url)', () => {
   const { verifier, challenge } = createPkce()
@@ -31,22 +45,29 @@ test('PKCE：challenge 是 verifier 的 sha256(base64url)', () => {
   assert.equal(challenge, createHash('sha256').update(verifier).digest('base64url'))
 })
 
-test('授权地址带上必要参数', () => {
-  const url = new URL(buildAuthUrl({ challenge: 'CH', state: 'ST', originator: 'pi' }))
-  assert.equal(url.origin + url.pathname, 'https://auth.openai.com/oauth/authorize')
-  assert.equal(url.searchParams.get('response_type'), 'code')
-  assert.equal(url.searchParams.get('client_id'), 'app_EMoamEEZ73f0CkXaXp7hrann')
-  assert.equal(url.searchParams.get('redirect_uri'), 'http://localhost:1455/auth/callback')
-  assert.equal(url.searchParams.get('scope'), 'openid profile email offline_access')
-  assert.equal(url.searchParams.get('code_challenge'), 'CH')
-  assert.equal(url.searchParams.get('code_challenge_method'), 'S256')
-  assert.equal(url.searchParams.get('state'), 'ST')
+test('授权地址走新的 /api/accounts/authorize，带上动态 client / host id / resource', () => {
+  const url = new URL(buildAuthUrl({ challenge: 'CH', state: 'ST', nonce: 'NO', hostId: 'urn:uuid:11111111-2222-3333-4444-555555555555' }))
+  assert.equal(url.origin + url.pathname, 'https://auth.openai.com/api/accounts/authorize')
+  const p = url.searchParams
+  assert.equal(p.get('client_id'), 'dynamic_agent_client')
+  assert.equal(p.get('response_type'), 'code')
+  assert.equal(p.get('redirect_uri'), CALLBACK)
+  assert.equal(p.get('resource'), 'https://api.openai.com/v1')
+  assert.match(p.get('scope'), /chatgpt\.tokens\.use\.direct/)
+  assert.equal(p.get('ext_agent_host_id'), 'urn:uuid:11111111-2222-3333-4444-555555555555')
+  assert.equal(p.get('code_challenge'), 'CH')
+  assert.equal(p.get('code_challenge_method'), 'S256')
+  assert.equal(p.get('state'), 'ST')
+  assert.equal(p.get('nonce'), 'NO')
+  assert.equal(p.get('agent_name_hint'), 'Aurabot')
 })
 
-test('粘贴回调地址能取出 code；只粘 code 也行', () => {
-  assert.deepEqual(parseAuthInput('http://localhost:1455/auth/callback?code=abc&state=xyz'), { code: 'abc', state: 'xyz' })
+test('粘贴回调地址能取出 code / state / 下发的 client_id；别的地址会拒绝', () => {
+  const full = `${CALLBACK}?code=abc&state=xyz&client_id=client_123`
+  assert.deepEqual(parseAuthInput(full), { code: 'abc', state: 'xyz', clientId: 'client_123', error: '' })
   assert.equal(parseAuthInput('abc123').code, 'abc123')
-  assert.equal(parseAuthInput('code=abc&state=1').code, 'abc')
+  assert.throws(() => parseAuthInput('http://evil.com/auth/callback?code=1'), /必须是以/)
+  assert.throws(() => parseAuthInput('http://127.0.0.1:1455/other?code=1'), /必须是以/)
 })
 
 test('JWT 里取 accountId / email', () => {
@@ -57,27 +78,30 @@ test('JWT 里取 accountId / email', () => {
   assert.equal(decodeJwt('garbage'), null)
 })
 
-test('401 会触发刷新；刷新后状态和邮箱跟着更新', async () => {
+test('令牌过期会刷新：带 resource + 存下来的 client_id，更新邮箱与有效期', async () => {
   const calls = []
-  const access = fakeJwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acc-2' } })
-  const idt = fakeJwt({ email: 'new@example.com' })
   const fetchImpl = async (url, init) => {
     calls.push({ url, body: String(init.body) })
-    return new Response(JSON.stringify({ access_token: access, refresh_token: 'rt2', expires_in: 3600, id_token: idt }), { status: 200 })
+    return new Response(JSON.stringify(tokenJson({
+      access_token: fakeJwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acc-2' } }),
+      id_token: fakeJwt({ email: 'new@example.com' }),
+      refresh_token: 'rt-2',
+    })), { status: 200 })
   }
   const auth = createCodexAuth({ log: silent, fetchImpl })
   writeFileSync(join(dataDir, 'codex-auth.json'), JSON.stringify({
-    type: 'oauth', access: 'old', refresh: 'rt1', expires: Date.now() - 1000, accountId: 'acc-1', email: 'old@example.com',
+    type: 'oauth', access: 'old', refresh: 'rt-1', expires: Date.now() - 1000, clientId: 'client_stored', accountId: 'acc-1', email: 'old@example.com',
   }))
   const got = await auth.ensureAccess()
-  assert.equal(got.access, access)
   assert.equal(got.accountId, 'acc-2')
-  assert.match(calls[0].body, /grant_type=refresh_token/)
-  assert.match(calls[0].body, /refresh_token=rt1/)
+  const body = calls[0].body
+  assert.match(body, /grant_type=refresh_token/)
+  assert.match(body, /refresh_token=rt-1/)
+  assert.match(body, /client_id=client_stored/)
+  assert.match(body, new RegExp('resource=' + encodeURIComponent('https://api.openai.com/v1')))
   const st = auth.status()
   assert.equal(st.loggedIn, true)
   assert.equal(st.email, 'new@example.com')
-  assert.equal(st.expired, false)
   auth.logout()
   assert.equal(auth.status().loggedIn, false)
 })
@@ -131,9 +155,8 @@ test('令牌过期（401）会刷新一次再重试', async () => {
     if (n === 1) return new Response(JSON.stringify({ error: { message: 'token expired' } }), { status: 401 })
     return new Response(JSON.stringify({ data: [{ b64_json: b64 }] }), { status: 200 })
   }
-  const cfg = normalize({ imageGen: { enabled: true, provider: 'codex' } })
   const gen = createImageGen({
-    getConfig: () => cfg,
+    getConfig: () => normalize({ imageGen: { enabled: true, provider: 'codex' } }),
     log: silent,
     fetchImpl,
     codexAuth: {
@@ -173,4 +196,14 @@ test('干净环境：没有令牌文件时 status 是未登录', async () => {
   assert.deepEqual(auth.status(), { loggedIn: false })
   assert.ok(!existsSync(join(dir, 'codex-auth.json')))
   process.env.AURABOT_DATA_DIR = dataDir
+})
+
+test('缺 chatgpt.tokens.use.direct 的授权会被拒绝（说明订阅没生效）', async () => {
+  const auth = createCodexAuth({
+    log: silent,
+    fetchImpl: async () => new Response(JSON.stringify(tokenJson({ scope: 'openid profile email' })), { status: 200 }),
+  })
+  writeFileSync(join(dataDir, 'codex-auth.json'), JSON.stringify({ type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() - 1, clientId: 'c' }))
+  await assert.rejects(() => auth.ensureAccess(), /chatgpt\.tokens\.use\.direct/)
+  auth.logout()
 })

@@ -2126,7 +2126,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
 
     /**
      * 「Codex 订阅」这一档：ChatGPT 账号登录（OAuth）+ 型号/质量。
-     * 登录走本地回调 http://localhost:1455；端口被占就复制授权链接、手动粘贴回调地址。
+     * 登录走本地回调 http://127.0.0.1:1455；端口被占就复制授权链接、手动粘贴回调地址。
      */
     function CodexSub({ draft, setDraft }) {
       const f = useField(draft, setDraft)
@@ -2180,7 +2180,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h('div', { className: 'ab-small', style: { wordBreak: 'break-all', margin: '6px 0', opacity: 0.8 } }, waiting.url),
           h('div', { className: 'ab-flex', style: { gap: 6, marginTop: 6, flexWrap: 'wrap' } },
             h(Btn, { small: true, onClick: () => { try { navigator.clipboard.writeText(waiting.url); toast('链接已复制') } catch (e) { toast('复制失败，手动选中吧') } } }, '复制登录链接'),
-            h('input', { className: 'ab-input', style: { flex: 1, minWidth: 220 }, value: paste, placeholder: 'http://localhost:1455/auth/callback?code=…', onChange: (e) => setPaste(e.target.value) }),
+            h('input', { className: 'ab-input', style: { flex: 1, minWidth: 220 }, value: paste, placeholder: '粘贴地址栏里那整条 http://127.0.0.1:…/auth/callback?code=…', onChange: (e) => setPaste(e.target.value) }),
             h(Btn, { small: true, kind: 'primary', onClick: doComplete }, '完成登录'))) : null,
         h(Row, { label: '型号', hint: '2.5 的两个型号质量和细节更好，也更慢' },
           f.select('imageGen.codex.model', [
