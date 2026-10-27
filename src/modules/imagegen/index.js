@@ -31,11 +31,36 @@ export default {
   version: '1.0.0',
   description: '画一张图发到聊天里（qq_draw_image）',
   tab: 'imagegen',
-  files: ['features/imagegen.js'],
+  files: ['features/imagegen.js', 'features/codex-auth.js'],
   setup(api) {
     const { hub, local } = api.core
     const memory = api.lazy('memory')
     const gen = createImageGen({ getConfig: api.config, log: api.log, local, dsh: api.dsh })
+    const auth = gen.codexAuth
+
+    // ChatGPT 订阅登录（OAuth）：发起 → 轮询状态 → 手动粘贴 → 退出
+    api.route('/image/codex/status', async () => ({ ok: true, ...auth.status(), login: auth.loginStatus() }))
+    api.route('/image/codex/login', async () => {
+      try {
+        const r = await auth.startLogin({})
+        return { ok: true, ...r, ...auth.loginStatus() }
+      } catch (error) {
+        return { ok: false, message: error.message }
+      }
+    })
+    api.route('/image/codex/login/status', async () => ({ ok: true, ...auth.loginStatus(), ...auth.status() }))
+    api.route('/image/codex/complete', async (req) => {
+      const b = await api.core.http.body(req).catch(() => ({}))
+      try {
+        const c = await auth.completeLogin(String((b && b.input) || ''))
+        return { ok: true, email: c.email || '', accountId: c.accountId || '' }
+      } catch (error) {
+        return { ok: false, message: error.message }
+      }
+    })
+    api.route('/image/codex/cancel', async () => ({ ok: true, ...auth.cancelLogin('已取消') }))
+    api.route('/image/codex/logout', async () => ({ ok: true, ...auth.logout() }))
+
     api.tool(({ chat, sessionId }) => (gen.enabled() && chat.kind !== 'system' ? defineTool({
       name: 'qq_draw_image',
       description: '画一张图并发到当前 QQ 聊天里。prompt 用中文或英文详细描述画面（主体、动作、场景、风格）。画好会直接发出去，同时把你自己看到的画面告诉你；回复里简单说一两句就行。',

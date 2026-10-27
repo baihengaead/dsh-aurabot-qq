@@ -2124,24 +2124,101 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       )
     }
 
+    /**
+     * 「Codex 订阅」这一档：ChatGPT 账号登录（OAuth）+ 型号/质量。
+     * 登录走本地回调 http://localhost:1455；端口被占就复制授权链接、手动粘贴回调地址。
+     */
+    function CodexSub({ draft, setDraft }) {
+      const f = useField(draft, setDraft)
+      const [st, setSt] = useState(null)
+      const [waiting, setWaiting] = useState(null) // { url, needPaste }
+      const [paste, setPaste] = useState('')
+      const refresh = () => get('/image/codex/status').then((r) => setSt(r)).catch(() => setSt({ ok: false }))
+      useEffect(() => { refresh() }, [])
+      useEffect(() => {
+        if (!waiting) return
+        const t = setInterval(async () => {
+          const r = await get('/image/codex/login/status').catch(() => null)
+          if (!r) return
+          if (r.state === 'done') { clearInterval(t); setWaiting(null); toast('登录成功'); refresh() }
+          else if (r.state === 'error') { clearInterval(t); setWaiting(null); toast(r.error || '登录失败'); refresh() }
+        }, 2000)
+        return () => clearInterval(t)
+      }, [waiting])
+      const startLogin = async () => {
+        const r = await post('/image/codex/login', {}).catch(() => ({ ok: false }))
+        if (!r.ok) return toast(r.message || '发起登录失败')
+        setWaiting({ url: r.url, needPaste: !!r.needPaste })
+        toast(r.needPaste ? '回调端口 1455 被占用：复制下面链接登录，再把跳转回来的地址粘进来' : '已在浏览器打开登录页，完成后这里会自动刷新')
+      }
+      const doComplete = async () => {
+        const r = await post('/image/codex/complete', { input: paste }).catch(() => ({ ok: false }))
+        if (!r.ok) return toast(r.message || '登录失败')
+        setWaiting(null); setPaste(''); toast('登录成功'); refresh()
+      }
+      const logout = async () => {
+        await post('/image/codex/logout', {}).catch(() => null)
+        refresh(); toast('已退出 ChatGPT')
+      }
+      const logged = st && st.loggedIn
+      return h('div', null,
+        h(Row, { label: 'ChatGPT 账号', hint: '用 Plus / Pro 订阅出图，不用 API Key；令牌只存本机' },
+          st === null
+            ? h('span', { className: 'ab-muted ab-small' }, '读取登录状态…')
+            : logged
+              ? h('div', { className: 'ab-flex', style: { alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+                h('span', { className: 'ab-small' }, '已登录：' + (st.email || st.accountId || 'ChatGPT')),
+                h(Btn, { small: true, kind: 'ghost', onClick: startLogin }, '重新登录'),
+                h(Btn, { small: true, kind: 'ghost', onClick: logout }, '退出'))
+              : h('div', { className: 'ab-flex', style: { alignItems: 'center', gap: 8 } },
+                h('span', { className: 'ab-muted ab-small' }, '还没登录'),
+                h(Btn, { small: true, kind: 'primary', onClick: startLogin }, '登录 ChatGPT'))),
+        waiting ? h('div', { className: 'ab-note', style: { marginTop: 8 } },
+          h('div', { className: 'ab-small' }, waiting.needPaste
+            ? '在浏览器里打开下面这条链接登录；登录后会跳到 localhost 地址，把整条地址复制到下面。'
+            : '浏览器已打开登录页；这里会自动完成。要是浏览器没弹出来，复制下面链接手动打开。'),
+          h('div', { className: 'ab-small', style: { wordBreak: 'break-all', margin: '6px 0', opacity: 0.8 } }, waiting.url),
+          h('div', { className: 'ab-flex', style: { gap: 6, marginTop: 6, flexWrap: 'wrap' } },
+            h(Btn, { small: true, onClick: () => { try { navigator.clipboard.writeText(waiting.url); toast('链接已复制') } catch (e) { toast('复制失败，手动选中吧') } } }, '复制登录链接'),
+            h('input', { className: 'ab-input', style: { flex: 1, minWidth: 220 }, value: paste, placeholder: 'http://localhost:1455/auth/callback?code=…', onChange: (e) => setPaste(e.target.value) }),
+            h(Btn, { small: true, kind: 'primary', onClick: doComplete }, '完成登录'))) : null,
+        h(Row, { label: '型号', hint: '2.5 的两个型号质量和细节更好，也更慢' },
+          f.select('imageGen.codex.model', [
+            { value: 'gpt-image-2', label: 'gpt-image-2' },
+            { value: 'gpt-image-2.5-flare', label: 'gpt-image-2.5-flare' },
+            { value: 'gpt-image-2.5-sunburst', label: 'gpt-image-2.5-sunburst' },
+          ], { width: 250 })),
+        h(Row, { label: '质量', hint: '越高越慢；走订阅额度，不额外计费' },
+          f.select('imageGen.codex.quality', [
+            { value: 'auto', label: '自动' }, { value: 'low', label: '低' }, { value: 'medium', label: '中' }, { value: 'high', label: '高' },
+            { value: 'xhigh', label: '很高（仅 2.5）' }, { value: 'max', label: '最高（仅 2.5）' },
+          ], { width: 200 })),
+        h(Row, { label: '背景', hint: '透明背景要看型号支持' },
+          f.select('imageGen.codex.background', [
+            { value: 'auto', label: '自动' }, { value: 'opaque', label: '不透明' }, { value: 'transparent', label: '透明' },
+          ], { width: 180 })),
+      )
+    }
+
     function ImageGen({ draft, setDraft }) {
       const f = useField(draft, setDraft)
       const c = draft.imageGen
       const custom = c.custom || {}
       const isCustom = c.provider === 'custom'
+      const isCodex = c.provider === 'codex'
       const isPost = custom.method === 'POST'
       const params = Array.isArray(custom.params) ? custom.params : []
       const setParams = (next) => setDraft(setPath(draft, 'imageGen.custom.params', next))
       const setP = (i, k, v) => setParams(params.map((p, j) => (j === i ? { ...p, [k]: v } : p)))
       return h('div', { className: 'ab-grid' },
         h(Card, { title: '让她画图', right: f.sw('imageGen.enabled'), desc: '接上一个生图服务后，聊天里让她「画一张……」，她会画好直接发出来。两种接法：OpenAI 兼容接口（/v1/images/generations，硅基流动、各家大模型平台、ComfyUI / SD WebUI 的兼容代理），或者自己填一个按 URL 调用的接口。想用本机的 SD WebUI / ComfyUI？去「本地接口」页接「生图」，这里可以不填。' },
-          h(Row, { label: '接口格式', hint: '第二个适合 pollinations 这类「把提示词写在地址里」的接口' },
+          h(Row, { label: '接口格式', hint: '三个选一个；第三个用 ChatGPT 订阅，不用 API Key' },
             h(Seg, {
-              value: isCustom ? 'custom' : 'openai',
+              value: isCodex ? 'codex' : (isCustom ? 'custom' : 'openai'),
               onChange: (v) => setDraft(setPath(draft, 'imageGen.provider', v)),
-              options: [{ value: 'openai', label: 'OpenAI 格式' }, { value: 'custom', label: '自定义接口' }],
+              options: [{ value: 'openai', label: 'OpenAI 格式' }, { value: 'custom', label: '自定义接口' }, { value: 'codex', label: 'Codex 订阅' }],
             })),
-          !isCustom ? h('div', null,
+          isCodex ? h(CodexSub, { draft, setDraft }) : (!isCustom ? h('div', null,
             h(Row, { label: '服务地址', hint: '一般以 /v1 结尾' }, f.text('imageGen.baseUrl', { size: 'wide', placeholder: 'https://api.siliconflow.cn/v1' })),
             h(Row, { label: 'API Key', hint: '只存在本机，不会显示出来' }, f.text('imageGen.apiKey', { type: 'password', placeholder: c.apiKeySet ? '已保存（不改就留空）' : '没有就留空' })),
             h(Row, { label: '模型' }, f.text('imageGen.model', { size: 'wide', placeholder: '例如 Kwai-Kolors/Kolors' })),
@@ -2175,7 +2252,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
               })) : null,
             h(Row, { label: '取值路径', hint: '接口直接回图片就留空；回 JSON 时填地址字段' },
               f.text('imageGen.custom.responsePath', { size: 'wide', placeholder: '如 data.0.url（留空自动找）' })),
-          ),
+          )),
           h(Row, { label: '图片尺寸', hint: isCustom ? '自定义接口里可以用 {size} 或 {width}/{height}' : null }, f.select('imageGen.size', [{ value: '1024x1024', label: '1024 × 1024', desc: '方图' }, { value: '768x1024', label: '768 × 1024', desc: '竖图' }, { value: '1024x768', label: '1024 × 768', desc: '横图' }, { value: '512x512', label: '512 × 512', desc: '小图，更快' }], { width: 200 })),
           h(Row, { label: '固定风格', hint: '每次画都会加在描述前面' }, f.text('imageGen.stylePrompt', { size: 'wide', placeholder: '例如：日系二次元，柔和光线，蓝白配色' })),
           h(Row, { label: '只给主人画', hint: '关掉后群友也能让她画（会花你的额度）' }, f.sw('imageGen.ownerOnly')),

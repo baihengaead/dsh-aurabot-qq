@@ -1,11 +1,14 @@
-// 生图：两种接法
+// 生图：三种接法
 //   ① openai —— 兼容 OpenAI /v1/images/generations 的服务（硅基流动、通义兼容层、ComfyUI/SD WebUI 的 OpenAI 代理……）
 //   ② custom —— 自己填接口：GET/POST、URL 模板（{prompt} 占位）、自定义参数名
+//   ③ codex  —— ChatGPT 订阅（OAuth 登录，走 chatgpt.com 的 Codex 生图端点，不花 API 额度）
 // 地址和密钥由主人在面板里填；生成结果统一成 Buffer 交给 QQ 发出。
 
+import { randomUUID } from 'node:crypto'
 import { fetchImage } from '../core/net.js'
 import { mimeOf } from '../chat/inbound.js'
 import { askModel, canSeeImages } from '../core/llm.js'
+import { createCodexAuth } from './codex-auth.js'
 
 /** 把模板里的 {占位符} 替换掉；不认识的占位符原样留着。 */
 function fill (tpl, vars) {
@@ -95,7 +98,10 @@ async function valueToBuffer (v) {
   throw new Error('生图接口返回的既不是图片地址也不是图片')
 }
 
-export function createImageGen({ getConfig, log, local, dsh }) {
+export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAuth }) {
+  const fetch = fetchImpl || ((...a) => globalThis.fetch(...a))
+  const auth = codexAuth || createCodexAuth({ log, fetchImpl: fetchImpl })
+
   async function generate(prompt) {
     const c = getConfig().imageGen
     // 本地接口接管：用用户自己电脑上的画图服务
@@ -111,6 +117,7 @@ export function createImageGen({ getConfig, log, local, dsh }) {
     const t = Date.now()
     let buf
     if (c.provider === 'custom') buf = await viaCustom(c, full)
+    else if (c.provider === 'codex') buf = await viaCodex(c, full)
     else buf = await viaOpenAI(c, full)
     if (!buf || !buf.length) throw new Error('生图接口没有返回图片')
     if (!String(mimeOf(buf)).startsWith('image/')) throw new Error('生图接口返回的不是图片')
@@ -142,6 +149,61 @@ export function createImageGen({ getConfig, log, local, dsh }) {
     const v = (cp.responsePath ? dotted(j, cp.responsePath) : null) || findImage(j)
     if (!v) throw new Error('生图接口没有返回图片地址')
     return valueToBuffer(v)
+  }
+
+  /**
+   * ChatGPT 订阅生图（Codex 端点）。
+   * 走订阅额度，不用 API Key；令牌来自生图页里的 OAuth 登录。
+   */
+  async function viaCodex (c, prompt) {
+    const cx = c.codex || {}
+    const body = {
+      prompt,
+      model: String(cx.model || 'gpt-image-2'),
+      quality: String(cx.quality || 'auto'),
+      size: String(c.size || '1024x1024'),
+      background: String(cx.background || 'auto'),
+    }
+    const once = async (access, accountId) => fetch('https://chatgpt.com/backend-api/codex/images/generations', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${access}`,
+        'chatgpt-account-id': accountId,
+        accept: 'application/json',
+        'content-type': 'application/json',
+        originator: 'pi',
+        'x-codex-image-turn-id': randomUUID(),
+        'user-agent': 'aurabot-qq',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(180000),
+    })
+    let { access, accountId } = await auth.ensureAccess()
+    log.info(`生图走 ChatGPT 订阅：${body.model} / ${body.size} / 质量 ${body.quality}`)
+    let r = await once(access, accountId)
+    // 令牌可能刚好过期：刷一次再试
+    if (r.status === 401) {
+      try { ({ access, accountId } = await auth.ensureAccess({ force: true })) } catch (error) {
+        throw new Error('订阅登录已过期，去生图页重新登录 ChatGPT')
+      }
+      r = await once(access, accountId)
+    }
+    const text = await r.text().catch(() => '')
+    let j = null
+    try { j = JSON.parse(text) } catch (error) {}
+    if (!r.ok) {
+      if (r.status === 401) throw new Error('订阅登录已失效，去生图页重新登录 ChatGPT')
+      if (r.status === 403) throw new Error('这个订阅 / 工作区不能用生图（HTTP 403）')
+      if (r.status === 429) throw new Error('订阅生图用得太频繁或额度用完了（HTTP 429）')
+      const msg = (j && (j.error?.message || j.message || j.detail)) || text.slice(0, 200)
+      throw new Error(`订阅生图失败（HTTP ${r.status}）${msg ? '：' + msg : ''}`)
+    }
+    const item = (j && Array.isArray(j.data) ? j.data[0] : null) || {}
+    if (typeof item.b64_json === 'string' && item.b64_json) return Buffer.from(item.b64_json, 'base64')
+    if (typeof item.url === 'string' && item.url) return fetchImage(item.url, { maxBytes: 20 * 1024 * 1024, allowLocal: false })
+    const v = j ? findImage(j) : null
+    if (v) return valueToBuffer(v)
+    throw new Error('订阅生图没有返回图片')
   }
 
   /** OpenAI 兼容接口。 */
@@ -200,8 +262,9 @@ export function createImageGen({ getConfig, log, local, dsh }) {
     if (local?.active('image')) return true
     const c = getConfig().imageGen
     if (!c.enabled) return false
+    if (c.provider === 'codex') return Boolean(auth.status().loggedIn)
     return c.provider === 'custom' ? Boolean(c.custom && c.custom.url) : Boolean(c.baseUrl && c.model)
   }
 
-  return { generate, look, enabled }
+  return { generate, look, enabled, codexAuth: auth }
 }

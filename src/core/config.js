@@ -40,13 +40,19 @@ export const DEFAULTS = {
   merge: { enabled: true, waitSec: 2.5, maxSec: 8, groupWaitSec: 5, groupMaxSec: 15 }, // 连发合并：对方停顿 waitSec 秒再一起回，最多等 maxSec 秒；群里等得久一点，把一段话攒齐
   imageGen: {
     enabled: false,
-    provider: 'openai', // openai = 兼容 OpenAI /v1/images/generations 的服务；custom = 自己填接口
+    provider: 'openai', // openai = 兼容 OpenAI /v1/images/generations 的服务；custom = 自己填接口；codex = ChatGPT 订阅（OAuth）
     custom: {
       method: 'GET', // GET：参数拼在地址上；POST：参数放进请求体
       url: '', // 接口地址模板，可用占位符 {prompt} {model} {size} {width} {height}
       params: [], // [{ key, value }] 自定义参数名和值，值里也能用 {prompt}
       bodyType: 'json', // POST 时的请求体格式：json | form
       responsePath: '', // 返回 JSON 时从哪儿取图，如 data.0.url；留空自动找
+    },
+    // ChatGPT 订阅生图（登录态在 data/codex-auth.json，不写进配置）
+    codex: {
+      model: 'gpt-image-2',
+      quality: 'auto', // auto / low / medium / high（2.5 的型号还有 xhigh / max）
+      background: 'auto', // auto / transparent / opaque
     },
     baseUrl: '',
     apiKey: '',
@@ -367,8 +373,14 @@ export function normalize(raw) {
   // 偷表情方式：ask = 她挑，auto = 全都偷
   c.stickers.collectMode = c.stickers.collectMode === 'auto' ? 'auto' : 'ask'
   if (!/^\d{3,4}x\d{3,4}$/.test(String(c.imageGen.size))) c.imageGen.size = '1024x1024'
-  // provider：custom = 自己填接口（GET/POST + 自定义参数），其它一律按 OpenAI 兼容
-  c.imageGen.provider = c.imageGen.provider === 'custom' ? 'custom' : 'openai'
+  // provider：custom = 自己填接口（GET/POST + 自定义参数），codex = ChatGPT 订阅，其它按 OpenAI 兼容
+  c.imageGen.provider = ['custom', 'codex'].includes(c.imageGen.provider) ? c.imageGen.provider : 'openai'
+  // ChatGPT 订阅生图：型号/质量/背景
+  if (!c.imageGen.codex || typeof c.imageGen.codex !== 'object') c.imageGen.codex = { ...DEFAULTS.imageGen.codex }
+  const igx = c.imageGen.codex
+  igx.model = ['gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'].includes(igx.model) ? igx.model : 'gpt-image-2'
+  igx.quality = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'].includes(igx.quality) ? igx.quality : 'auto'
+  igx.background = ['auto', 'transparent', 'opaque'].includes(igx.background) ? igx.background : 'auto'
   if (!c.imageGen.custom || typeof c.imageGen.custom !== 'object') c.imageGen.custom = { ...DEFAULTS.imageGen.custom }
   const igc = c.imageGen.custom
   igc.method = String(igc.method || 'GET').toUpperCase() === 'POST' ? 'POST' : 'GET'
