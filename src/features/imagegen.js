@@ -179,6 +179,8 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
       signal: AbortSignal.timeout(180000),
     })
     let { access, accountId } = await auth.ensureAccess()
+    // 图片端点必须带 chatgpt-account-id；没有就说明登录拿到的 token 不对，别拿 401 当"过期"
+    if (!accountId) throw new Error('登录信息里没有账号 ID，去生图页重新登录一次 ChatGPT')
     log.info(`生图走 ChatGPT 订阅：${body.model} / ${body.size} / 质量 ${body.quality}`)
     let r = await once(access, accountId)
     // 令牌可能刚好过期：刷一次再试

@@ -1,32 +1,32 @@
 // ChatGPT（Codex 订阅）的 OAuth：浏览器登录 → 存令牌 → 过期自动刷新。
 //
-// 走的是新的 "Sign in with ChatGPT" 公开客户端流程（和 DSH 的 oauth/openai-chatgpt.js 一致）：
-//   授权 https://auth.openai.com/api/accounts/authorize
-//        client_id=dynamic_agent_client（每次登录由服务端下发真正可用的 client_id，从回调里取）
-//        ext_agent_host_id=urn:uuid:<本机 UUID>、resource=https://api.openai.com/v1
-//        scope 含 chatgpt.tokens.use.direct
-//   换票 https://auth.openai.com/api/accounts/oauth/token
-// 旧的 Codex CLI 流程（client_id=app_EMoa…、/oauth/authorize）现在会报「缺少必填参数」，不要再走。
+// 走 Codex CLI 那条流程（client_id 是公开的 app_EMoamEEZ73f0CkXaXp7hrann）：
+//   授权 https://auth.openai.com/oauth/authorize
+//   换票 https://auth.openai.com/oauth/token
+// 为什么不用 "Sign in with ChatGPT" 动态客户端流程（/api/accounts/authorize）：
+//   那条流程发的 token 只面向 api.openai.com（scope 里是 resource.invoke + chatgpt.tokens.use.direct），
+//   JWT 里没有 chatgpt_account_id；而图片端点 chatgpt.com/backend-api/codex/images/generations
+//   必须带 chatgpt-account-id 头，否则一律 401。所以生图必须用这条 token。
+//
+// 令牌只存在本机 data/codex-auth.json，不写日志、不回传给面板。
 
-import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, unlinkSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
 import { dataDir, readJson, writeJson } from '../core/store.js'
 
-const DYNAMIC_CLIENT_ID = 'dynamic_agent_client'
-const AUTHORIZE_URL = 'https://auth.openai.com/api/accounts/authorize'
-const TOKEN_URL = 'https://auth.openai.com/api/accounts/oauth/token'
-const RESOURCE = 'https://api.openai.com/v1'
-const DIRECT_TOKEN_SCOPE = 'chatgpt.tokens.use.direct'
-const SCOPE = `openid profile email offline_access resource.invoke ${DIRECT_TOKEN_SCOPE}`
+const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
+const AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize'
+const TOKEN_URL = 'https://auth.openai.com/oauth/token'
+const SCOPE = 'openid profile email offline_access'
 const CALLBACK_HOST = '127.0.0.1'
 const CALLBACK_PORT = 1455
 const CALLBACK_PATH = '/auth/callback'
-const REDIRECT_URI = `http://${CALLBACK_HOST}:${CALLBACK_PORT}${CALLBACK_PATH}`
+// 这条流程的 redirect_uri 必须是注册过的固定地址（Codex CLI 用的就是它），不能随机端口
+const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}${CALLBACK_PATH}`
 const JWT_CLAIM_PATH = 'https://api.openai.com/auth'
-const REFRESH_SKEW_MS = 3 * 60_000
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const REFRESH_SKEW_MS = 2 * 60_000
 
 /** PKCE：verifier 随机串，challenge 是它的 sha256(b64url)。 */
 export function createPkce () {
@@ -35,22 +35,19 @@ export function createPkce () {
   return { verifier, challenge }
 }
 
-/** 拼授权地址（新流程：带 host id / nonce / resource）。 */
-export function buildAuthUrl ({ challenge, state, nonce, hostId, redirectUri = REDIRECT_URI, agentName = 'Aurabot' }) {
+/** 拼授权地址（参数同 Codex CLI）。 */
+export function buildAuthUrl ({ challenge, state, originator = 'pi' }) {
   const url = new URL(AUTHORIZE_URL)
-  url.search = new URLSearchParams({
-    client_id: DYNAMIC_CLIENT_ID,
-    agent_name_hint: agentName,
-    ext_agent_host_id: hostId,
-    response_type: 'code',
-    redirect_uri: redirectUri,
-    resource: RESOURCE,
-    scope: SCOPE,
-    state,
-    code_challenge: challenge,
-    code_challenge_method: 'S256',
-    nonce,
-  }).toString()
+  url.searchParams.set('response_type', 'code')
+  url.searchParams.set('client_id', CLIENT_ID)
+  url.searchParams.set('redirect_uri', REDIRECT_URI)
+  url.searchParams.set('scope', SCOPE)
+  url.searchParams.set('code_challenge', challenge)
+  url.searchParams.set('code_challenge_method', 'S256')
+  url.searchParams.set('state', state)
+  url.searchParams.set('id_token_add_organizations', 'true')
+  url.searchParams.set('codex_cli_simplified_flow', 'true')
+  url.searchParams.set('originator', originator)
   return url.toString()
 }
 
@@ -65,7 +62,7 @@ export function decodeJwt (token) {
   }
 }
 
-/** access token 里的 chatgpt_account_id。 */
+/** access token 里的 chatgpt_account_id（生图必需）。 */
 export function accountIdOf (accessToken, idToken) {
   for (const t of [accessToken, idToken]) {
     const p = decodeJwt(t)
@@ -81,32 +78,25 @@ export function emailOf (idToken) {
   return (p && (p.email || (p[JWT_CLAIM_PATH] && p[JWT_CLAIM_PATH].email))) || ''
 }
 
-/**
- * 解析回调地址 / 手动粘贴的地址：
- * 新流程的回调里会带服务端下发的 client_id，必须一起取出来。
- */
-export function parseAuthInput (input, redirectUri = REDIRECT_URI) {
+/** 从用户粘贴的整条回调地址 / code 里取出授权码。 */
+export function parseAuthInput (input) {
   const v = String(input || '').trim()
   if (!v) return {}
   let url = null
   try { url = new URL(v) } catch (error) {}
   if (url) {
-    const want = new URL(redirectUri)
-    if (url.origin !== want.origin || url.pathname !== want.pathname) {
-      throw new Error(`粘贴的地址必须是以 ${redirectUri} 开头的整条回调地址`)
-    }
+    // 1455 打不开时浏览器地址栏里仍是一条 localhost 回调地址，这里不强校验主机名
     return {
       code: url.searchParams.get('code') || '',
       state: url.searchParams.get('state') || '',
-      clientId: (url.searchParams.get('client_id') || '').trim(),
       error: url.searchParams.get('error') || '',
     }
   }
   if (v.includes('code=')) {
     const q = new URLSearchParams(v.replace(/^[^?]*\?/, ''))
-    return { code: q.get('code') || '', state: q.get('state') || '', clientId: (q.get('client_id') || '').trim(), error: q.get('error') || '' }
+    return { code: q.get('code') || '', state: q.get('state') || '', error: q.get('error') || '' }
   }
-  return { code: v, state: '', clientId: '', error: '' }
+  return { code: v, state: '', error: '' }
 }
 
 /**
@@ -136,21 +126,13 @@ export function openInBrowser (url, { run = spawn, platform = process.platform }
 export function createCodexAuth ({ log, fetchImpl, openUrl } = {}) {
   const doFetch = fetchImpl || ((...a) => globalThis.fetch(...a))
   const file = () => dataDir('codex-auth.json')
-  const deviceFile = () => dataDir('codex-device.json')
-  let pending = null // { state, verifier, nonce, server, status, error, email, needPaste }
-
-  /** 本机安装标识（uuid），第一次用时生成并持久化。 */
-  function deviceId () {
-    const cur = readJson(deviceFile(), () => null)
-    if (cur && UUID_RE.test(String(cur.id || ''))) return String(cur.id)
-    const id = randomUUID()
-    writeJson(deviceFile(), { id })
-    return id
-  }
+  const defaultOpenUrl = (url) => openInBrowser(url)
+  let pending = null // { state, verifier, server, status, error, email, needPaste }
 
   function read () {
     const v = readJson(file(), () => null)
-    return v && v.access && v.refresh && v.clientId ? v : null
+    // 旧格式（没有 accountId，比如之前那版动态客户端流程存下的）一律当没登录：生图必须要账号 ID
+    return v && v.access && v.refresh && v.accountId ? v : null
   }
 
   function save (cred) { writeJson(file(), cred) }
@@ -171,39 +153,34 @@ export function createCodexAuth ({ log, fetchImpl, openUrl } = {}) {
     }
   }
 
-  /** 令牌响应 → 本地凭据。新流程要求返回 scope 里含 chatgpt.tokens.use.direct。 */
-  function toCredential (json, clientId, prev = {}) {
+  function toCredential (json, prev = {}) {
     if (!json || !json.access_token || !json.refresh_token) {
       throw new Error('登录返回缺字段（access_token / refresh_token）')
     }
     if (typeof json.expires_in !== 'number' || !Number.isFinite(json.expires_in) || json.expires_in <= 0) {
       throw new Error('登录返回的 expires_in 不正常')
     }
-    const scopes = String(json.scope || '').trim().split(/\s+/).filter(Boolean)
-    if (scopes.length && !scopes.includes(DIRECT_TOKEN_SCOPE)) {
-      throw new Error(`这次授权没拿到 ${DIRECT_TOKEN_SCOPE}（订阅可能没生效）`)
-    }
     const access = json.access_token
     const idToken = json.id_token || ''
-    const next = {
+    const accountId = accountIdOf(access, idToken) || prev.accountId || ''
+    if (!accountId) {
+      throw new Error('登录成功但 token 里没有 chatgpt_account_id（生图要用），请确认这个账号是 ChatGPT Plus/Pro')
+    }
+    return {
       type: 'oauth',
       access,
       refresh: json.refresh_token,
       expires: Date.now() + json.expires_in * 1000 - REFRESH_SKEW_MS,
-      clientId: clientId || prev.clientId || '',
-      scopes: scopes.length ? scopes : (prev.scopes || []),
-      accountId: accountIdOf(access, idToken) || prev.accountId || '',
+      accountId,
       email: emailOf(idToken) || prev.email || '',
     }
-    if (!next.clientId) throw new Error('没拿到服务端下发的 client_id')
-    return next
   }
 
-  async function postToken (params) {
+  async function postToken (form) {
     const r = await doFetch(TOKEN_URL, {
       method: 'POST',
       headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ ...params, resource: RESOURCE }).toString(),
+      body: new URLSearchParams(form).toString(),
       signal: AbortSignal.timeout(30000),
     })
     const text = await r.text().catch(() => '')
@@ -211,85 +188,63 @@ export function createCodexAuth ({ log, fetchImpl, openUrl } = {}) {
     try { return JSON.parse(text) } catch (error) { throw new Error('换取令牌返回的不是 JSON') }
   }
 
-  async function exchange (code, verifier, clientId, redirectUri = REDIRECT_URI) {
-    if (!clientId) throw new Error('回调里没有 client_id（授权没走动态注册流程？）')
+  async function exchange (code, verifier) {
     const json = await postToken({
       grant_type: 'authorization_code',
-      client_id: clientId,
+      client_id: CLIENT_ID,
       code,
       code_verifier: verifier,
-      redirect_uri: redirectUri,
+      redirect_uri: REDIRECT_URI,
     })
-    const cred = toCredential(json, clientId)
+    const cred = toCredential(json)
     save(cred)
-    log?.info?.(`ChatGPT 订阅登录成功：${cred.email || cred.accountId || '(已登录)'}`)
+    log?.info?.(`ChatGPT 订阅登录成功：${cred.email || cred.accountId}`)
     return cred
   }
 
-  const defaultOpenUrl = (url) => openInBrowser(url)
-
-  /**
-   * 本地回调服务：先试 1455（Codex CLI 的约定端口），被占用就换一个随机端口。
-   * 端口用随机值时，redirect_uri 也跟着变；服务端在换票时会核对，所以两处要一致。
-   */
+  /** 本地回调服务（固定 1455）；端口被占返回 server=null，面板改用手动粘贴。 */
   function startCallbackServer (state) {
     return new Promise((resolve) => {
       let settle = () => {}
       const result = new Promise((res) => { settle = res })
-      const handler = (req, res) => {
+      const server = createServer((req, res) => {
         const html = (code, body) => { res.writeHead(code, { 'content-type': 'text/html; charset=utf-8' }); res.end(`<meta charset="utf-8">${body}`) }
         try {
-          const url = new URL(req.url || '', 'http://127.0.0.1')
+          const url = new URL(req.url || '', `http://${CALLBACK_HOST}:${CALLBACK_PORT}`)
           if (url.pathname !== CALLBACK_PATH) return html(404, '回调路径不对')
           const err = url.searchParams.get('error')
           if (err) { html(400, '登录没有完成：' + err); settle({ error: err }); return }
           const code = url.searchParams.get('code') || ''
           const gotState = url.searchParams.get('state') || ''
-          const clientId = (url.searchParams.get('client_id') || '').trim()
           if (!code) return html(400, '没有 code')
-          if (gotState !== state) return html(400, 'state 不匹配')
+          if (gotState && gotState !== state) return html(400, 'state 不匹配')
           html(200, '<h2>登录成功，可以关掉这个页面了</h2><p>回到 Aurabot 面板继续。</p>')
           try { server.close() } catch (error) {}
-          settle({ code, clientId })
+          settle({ code })
         } catch (error) {
           html(500, '处理回调出错')
         }
-      }
-      let server = null
-      const listen = (port, fallback) => {
-        server = createServer(handler)
-        server.once('error', () => {
-          try { server.close() } catch (error) {}
-          if (fallback) listen(0, false)
-          else resolve({ server: null, port: 0, result: null })
-        })
-        server.listen(port, CALLBACK_HOST, () => {
-          const actual = server.address() && server.address().port
-          resolve({ server, port: actual || port, result })
-        })
-      }
-      listen(CALLBACK_PORT, true)
+      })
+      server.once('error', () => resolve({ server: null, result: null }))
+      server.listen(CALLBACK_PORT, CALLBACK_HOST, () => resolve({ server, result }))
     })
   }
 
-  /** 开始登录：返回授权地址；有回调服务时后台等它，否则等用户手动粘贴。 */
-  async function startLogin ({ agentName = 'Aurabot', openBrowser = true } = {}) {
+  /** 开始登录：返回授权地址；1455 能起就在后台等回调，否则让用户手动粘贴。 */
+  async function startLogin ({ agentName = 'pi', openBrowser = true } = {}) {
     if (pending) cancelLogin('重新发起登录')
     const { verifier, challenge } = createPkce()
-    const state = randomBytes(32).toString('base64url')
-    const nonce = randomBytes(32).toString('base64url')
-    const hostId = `urn:uuid:${deviceId().toLowerCase()}`
-    const cb = await startCallbackServer(state)
-    const redirectUri = `http://${CALLBACK_HOST}:${cb.port || CALLBACK_PORT}${CALLBACK_PATH}`
-    const url = buildAuthUrl({ challenge, state, nonce, hostId, redirectUri, agentName })
-    const p = { state, verifier, nonce, redirectUri, status: 'waiting', error: '', email: '', needPaste: false }
+    const state = randomBytes(16).toString('hex')
+    const url = buildAuthUrl({ challenge, state, originator: agentName })
+    const p = { state, verifier, status: 'waiting', error: '', email: '', needPaste: false }
     pending = p
+    const cb = await startCallbackServer(state)
     if (cb.server) {
       p.server = cb.server
       cb.result.then(async (r) => {
         try {
           if (r.error) throw new Error('授权失败：' + r.error)
-          const cred = await exchange(r.code, verifier, r.clientId, redirectUri)
+          const cred = await exchange(r.code, verifier)
           p.status = 'done'
           p.email = cred.email || ''
         } catch (error) {
@@ -299,21 +254,21 @@ export function createCodexAuth ({ log, fetchImpl, openUrl } = {}) {
       }).catch(() => {})
     } else {
       p.needPaste = true
-      log?.info?.('本地回调端口起不来，改用手动粘贴回调地址')
+      log?.info?.('本地 1455 端口被占用，改用手动粘贴回调地址')
     }
     if (openBrowser) (openUrl || defaultOpenUrl)(url)
-    return { url, needPaste: p.needPaste, redirectUri }
+    return { url, needPaste: p.needPaste }
   }
 
-  /** 手动粘贴整条回调地址（必须带 code / state / client_id）。 */
+  /** 手动粘贴整条回调地址（或只有 code）。 */
   async function completeLogin (input) {
     const verifier = pending && pending.verifier
     if (!verifier) throw new Error('登录会话已失效，请重新点「登录 ChatGPT」')
-    const parsed = parseAuthInput(input, pending.redirectUri || REDIRECT_URI)
+    const parsed = parseAuthInput(input)
     if (parsed.error) throw new Error('授权失败：' + parsed.error)
     if (!parsed.code) throw new Error('没找到授权码')
     if (parsed.state && parsed.state !== pending.state) throw new Error('state 不匹配，请重新登录')
-    const cred = await exchange(parsed.code, verifier, parsed.clientId, pending.redirectUri || REDIRECT_URI)
+    const cred = await exchange(parsed.code, verifier)
     pending.status = 'done'
     pending.email = cred.email || ''
     return cred
@@ -337,10 +292,10 @@ export function createCodexAuth ({ log, fetchImpl, openUrl } = {}) {
     if (force || (Number(c.expires) && Number(c.expires) < Date.now() + REFRESH_SKEW_MS)) {
       const json = await postToken({
         grant_type: 'refresh_token',
-        client_id: c.clientId,
         refresh_token: c.refresh,
+        client_id: CLIENT_ID,
       })
-      const next = toCredential({ refresh_token: c.refresh, ...json }, c.clientId, c)
+      const next = toCredential({ refresh_token: c.refresh, ...json }, c)
       save(next)
       log?.debug?.('ChatGPT 订阅令牌已刷新')
       c = next
@@ -355,5 +310,5 @@ export function createCodexAuth ({ log, fetchImpl, openUrl } = {}) {
     return { ok: true }
   }
 
-  return { status, startLogin, completeLogin, loginStatus, cancelLogin, ensureAccess, logout, deviceId }
+  return { status, startLogin, completeLogin, loginStatus, cancelLogin, ensureAccess, logout }
 }

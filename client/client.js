@@ -2126,7 +2126,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
 
     /**
      * 「Codex 订阅」这一档：ChatGPT 账号登录（OAuth）+ 型号/质量。
-     * 登录走本地回调 http://127.0.0.1:1455；端口被占就复制授权链接、手动粘贴回调地址。
+     * 登录走本地回调 http://localhost:1455；端口被占就复制授权链接、手动粘贴回调地址。
      */
     function CodexSub({ draft, setDraft }) {
       const f = useField(draft, setDraft)
