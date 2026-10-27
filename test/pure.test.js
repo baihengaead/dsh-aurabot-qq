@@ -163,6 +163,12 @@ test('stickerSizeOk 尺寸兜底', () => {
   assert.equal(stickerSizeOk({ width: 1080, height: 1080, bytes: 50_000 }), false)
   assert.equal(stickerSizeOk({ width: 300, height: 100, bytes: 50_000 }), false)
   assert.equal(stickerSizeOk({ width: 240, height: 240, bytes: 2_000_000 }), false)
+  // QQ 表情不是正方形：4:3（310x224 是最常见的一档）、16:9 截图当表情，都要收得下
+  assert.equal(stickerSizeOk({ width: 310, height: 224, bytes: 29_061 }), true, '4:3 的表情不能误拦')
+  assert.equal(stickerSizeOk({ width: 1280, height: 720, bytes: 200_000 }, { maxSide: 1600 }), true, '16:9 截图当表情也能收')
+  // 极端长条仍然挡掉（横幅 / 长截图不是表情）
+  assert.equal(stickerSizeOk({ width: 900, height: 150, bytes: 50_000 }), false)
+  assert.equal(stickerSizeOk({ width: 150, height: 900, bytes: 50_000 }), false)
 })
 
 test('imageSize 读 PNG 宽高', () => {

@@ -23,10 +23,10 @@ writeFileSync(join(dataDir, 'config.json'), JSON.stringify({
 }))
 
 // 两张不同的「表情」（PNG 头 + 不同内容，保证 md5 不同）
-const png = (salt) => {
+const png = (salt, w = 200, h = 200) => {
   const b = Buffer.alloc(96)
   b[0] = 0x89; b[1] = 0x50; b[2] = 0x4e; b[3] = 0x47; b[7] = 0x0a
-  b.writeUInt32BE(200, 16); b.writeUInt32BE(200, 20)
+  b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20)
   b[40] = salt
   return b
 }
@@ -118,6 +118,15 @@ test('群里也收得到「她挑」的提示（以前群聊那条路会把它�
   assert.match(String(t.userText), /qq_collect_sticker/, '群里也该告诉她可以收表情')
   assert.match(String(t.userText), /你自己的小爱好/, '措辞要是她自己的念头，不是发图的人在提醒')
   assert.equal(library().length, 2, '只是提示，她没说要收，库里不该多')
+})
+
+test('4:3 的表情收得下（以前会被「尺寸不像表情」误拦）', async () => {
+  await send('收下吧收下', png(5, 310, 224))
+  const t = fake.turns.at(-1)
+  const call = t.toolCalls.find((c) => c.name === 'qq_collect_sticker')
+  assert.ok(call, '应该调用了 qq_collect_sticker')
+  assert.equal(call.result.ok, true, '310x224 是 QQ 最常见的一档，不能挡：' + JSON.stringify(call.result))
+  assert.ok(!/尺寸不像表情/.test(String(call.result.message || '')), '不该再报尺寸问题')
 })
 
 after(() => fake.dispose())

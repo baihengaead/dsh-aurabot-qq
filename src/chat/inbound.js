@@ -122,8 +122,10 @@ export function stickerSizeOk({ width, height, bytes }, limits = {}) {
   if (!(bytes > 0) || bytes > maxBytes) return false
   if (!(width > 0) || !(height > 0)) return true // 读不出尺寸就只看体积
   if (width > maxSide || height > maxSide) return false
+  // QQ 表情的形状比"正方形"宽松得多：常见 1:1、4:3（310x224）、3:2，还有拿截图当表情的 16:9。
+  // 这里只挡极端的长条 / 竖条（横幅、长截图那种），别再按 0.75~1.33 卡 —— 那会把正常表情误拦。
   const r = width / height
-  return r >= 0.75 && r <= 1.33
+  return r >= 0.45 && r <= 2.2
 }
 
 /** 从图片字节里读宽高（PNG / GIF / JPEG / WEBP），读不出返回 0。 */
