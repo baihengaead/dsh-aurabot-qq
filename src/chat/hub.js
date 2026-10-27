@@ -847,15 +847,20 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
 
     const allowed = checkAllowed(cfg, msg)
     // 偷表情：只从白名单里的会话偷。
-    //   auto = 全都偷（看到就收）；ask = 她挑（先记着，她喜欢再凭编号来收）
+    //   auto  = 全都偷（看到就收）；ask = 她挑（先记着，她喜欢再凭编号来收）
+    //   owner = 只听主人的：先记着，但只有主人发来的表情才提示她收；
+    //           真正能不能收由工具那边再按「这一轮说话的全是主人」把关
     let stickerPick = 0
+    const collectMode = cfg.stickers.collectMode || 'ask'
     if (allowed.allowed && msg.stickers.length && cfg.stickers.collect) {
       const okSrc = msg.kind === 'group' ? cfg.stickers.fromGroups : cfg.stickers.fromPrivate
       if (okSrc) {
-        if ((cfg.stickers.collectMode || 'ask') === 'auto') {
+        if (collectMode === 'auto') {
           for (const s of msg.stickers) stickers.collect(s, msg.chatId).then((r) => { if (!r.ok) log.debug('没收这张表情：', r.reason) }).catch(() => {})
         } else {
           stickerPick = rememberStickers(msg.chatId, msg.stickers)
+          // 只听主人的：别人发的先悄悄记着（主人之后说「收下那张」还能用），但不提示她
+          if (collectMode === 'owner' && !isOwner(cfg, msg.userId)) stickerPick = 0
         }
       }
     }

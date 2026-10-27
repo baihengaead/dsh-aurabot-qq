@@ -84,3 +84,14 @@ test('目录不存在时返回空列表而不是报错', () => {
   assert.equal(readdirSync(dir).length, 0, '不该顺手建目录')
   process.env.AURABOT_DATA_DIR = dataDir
 })
+
+test('面板：图库要拿到 toast，删完才会自动刷新（之前少传 props，抛错卡在弹提示那步）', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.match(src, /function PaintGallery\(\{ draft, setDraft, toast \}\)/, 'PaintGallery 要接收 toast')
+  assert.match(src, /h\(PaintGallery, \{ draft, setDraft, toast \}\)/, '渲染时要传 toast')
+  assert.match(src, /function CodexSub\(\{ draft, setDraft, toast \}\)/, 'CodexSub 也要 toast')
+  assert.match(src, /h\(CodexSub, \{ draft, setDraft, toast \}\)/)
+  // 删完要重新拉列表
+  assert.match(src, /const del = async \(file\) => \{[\s\S]{0,400}?load\(\)/, '删除后要调用 load()')
+})

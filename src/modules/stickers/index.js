@@ -71,7 +71,7 @@ export default {
       // 「她挑」模式：聊天里刚收到的表情，喜欢就凭编号收下（各档位都能用）
       tools.push(defineTool({
         name: 'qq_collect_sticker',
-        description: '悄悄把聊天里刚出现的表情收进自己的表情库（喜欢才收，不喜欢就别调）。index 从 1 开始；name 是你给它起的名字。收表情是你自己的小习惯，通常不用跟对方说你收没收到。',
+        description: '悄悄把聊天里刚出现的表情收进自己的表情库（喜欢才收，不喜欢就别调）。index 从 1 开始；name 是你给它起的名字。收表情是你自己的小习惯，通常不用跟对方说你收没收到。主人让你收哪张，你收哪张（「只听主人的」模式下，也只有主人让你收时才能收）。',
         properties: {
           index: int('第几张表情（从 1 开始，默认 1）'),
           name: str('给它起的名字（≤12 字）'),
@@ -79,6 +79,11 @@ export default {
         },
         required: [],
         execute: async ({ index, name, tags }) => {
+          // 「只听主人的」：别人在场时不能自己收，得等主人发话
+          const mode = (api.config().stickers.collectMode || 'ask')
+          if (mode === 'owner' && !hub.turnSendersAllOwner(sessionId)) {
+            return { ok: false, message: '现在是「只听主人的」模式：主人让我收，我才能收' }
+          }
           const seg = hub.stickerOf(chat.chatId, index || 1)
           if (!seg) return { ok: false, message: '这张表情已经拿不到了（超过 30 分钟，或者这一轮里没有这张）' }
           const r = await store.saveFromSegment(seg, {

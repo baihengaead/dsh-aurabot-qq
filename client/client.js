@@ -1099,13 +1099,12 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         h(Card, { title: '表情包', right: f.sw('stickers.enabled'), desc: '回复里写 <sticker:名字> 就会发对应的表情；也会按概率自动配一张。' },
           h(Row, { label: '自动配表情的概率' }, f.percent('stickers.autoChance')),
           h(Row, { label: '偷表情', hint: '别人发的表情包会被收藏（普通照片不收）。' }, f.sw('stickers.collect'), h('span', { className: 'ab-muted' }, '从群里'), f.sw('stickers.fromGroups'), h('span', { className: 'ab-muted' }, '从私聊'), f.sw('stickers.fromPrivate')),
-          h(Row, { label: '偷表情方式', hint: draft.stickers.collectMode === 'auto' ? '看到就收，不用她同意；库里可能混进她自己也不喜欢的' : '只把表情递给她看，喜欢才收（她起的名字）；不喜欢的就不收' },
-            h(Seg, {
-              value: draft.stickers.collectMode === 'auto' ? 'auto' : 'ask',
-              disabled: !draft.stickers.collect,
-              onChange: (v) => setDraft(setPath(draft, 'stickers.collectMode', v)),
-              options: [{ value: 'auto', label: '全都偷' }, { value: 'ask', label: '她挑' }],
-            })),
+          h(Row, { label: '偷表情方式', hint: '这三种都会听主人使唤：主人让她收哪张，她就收哪张' },
+            draft.stickers.collect ? f.choices('stickers.collectMode', [
+              { value: 'ask', label: '她挑', desc: '只把表情递给她看，喜欢才收（她起的名字）；也听主人的' },
+              { value: 'auto', label: '全都偷', desc: '看到就收，不用她同意；也听主人的' },
+              { value: 'owner', label: '只听主人的', desc: '只有主人让她收的时候才收；别人发的先悄悄记着，但不提示她' },
+            ]) : h('span', { className: 'ab-muted ab-small' }, '先把上面的「偷表情」打开')),
           h(Row, { label: '每小时最多收' }, f.num('stickers.maxPerHour', { min: 0 }), h('span', { className: 'ab-muted' }, '张')),
           h(Row, { label: '表情库最多存', hint: 'QQ 收藏表情有数量上限，满了就收不进去了。超过这个数会自动清掉最少用的偷来的表情（你自己加的不会动）' }, f.num('stickers.maxLibrary', { min: 20, max: 2000 }), h('span', { className: 'ab-muted' }, '张')),
           h(Row, { label: '看图起名', hint: '收下后让模型看图起个 12 字以内的备注' }, f.sw('stickers.caption')),
@@ -2128,7 +2127,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
      * 「Codex 订阅」这一档：ChatGPT 账号登录（OAuth）+ 型号/质量。
      * 登录走本地回调 http://localhost:1455；端口被占就复制授权链接、手动粘贴回调地址。
      */
-    function CodexSub({ draft, setDraft }) {
+    function CodexSub({ draft, setDraft, toast }) {
       const f = useField(draft, setDraft)
       const [st, setSt] = useState(null)
       const [waiting, setWaiting] = useState(null) // { url, needPaste }
@@ -2201,7 +2200,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     }
 
     /** 「她的画作」：读存图目录里最近的 N 张，可以单张删除、开文件夹。 */
-    function PaintGallery({ draft, setDraft }) {
+    function PaintGallery({ draft, setDraft, toast }) {
       const f = useField(draft, setDraft)
       const shown = Math.min(50, Math.max(1, Number(draft.imageGen && draft.imageGen.galleryShown) || 20))
       const [data, setData] = useState(null)
@@ -2243,7 +2242,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       )
     }
 
-    function ImageGen({ draft, setDraft }) {
+    function ImageGen({ draft, setDraft, toast }) {
       const f = useField(draft, setDraft)
       const c = draft.imageGen
       const custom = c.custom || {}
@@ -2261,7 +2260,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
               onChange: (v) => setDraft(setPath(draft, 'imageGen.provider', v)),
               options: [{ value: 'openai', label: 'OpenAI 格式' }, { value: 'custom', label: '自定义接口' }, { value: 'codex', label: 'Codex 订阅' }],
             })),
-          isCodex ? h(CodexSub, { draft, setDraft }) : (!isCustom ? h('div', null,
+          isCodex ? h(CodexSub, { draft, setDraft, toast }) : (!isCustom ? h('div', null,
             h(Row, { label: '服务地址', hint: '一般以 /v1 结尾' }, f.text('imageGen.baseUrl', { size: 'wide', placeholder: 'https://api.siliconflow.cn/v1' })),
             h(Row, { label: 'API Key', hint: '只存在本机，不会显示出来' }, f.text('imageGen.apiKey', { type: 'password', placeholder: c.apiKeySet ? '已保存（不改就留空）' : '没有就留空' })),
             h(Row, { label: '模型' }, f.text('imageGen.model', { size: 'wide', placeholder: '例如 Kwai-Kolors/Kolors' })),
@@ -2318,7 +2317,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           isCustom ? h('div', { className: 'ab-note', style: { marginTop: 10 } }, '例子：地址填 https://image.pollinations.ai/prompt/{prompt}，再加 model=flux-anime、width=1080、height=1920、nologo=true 四个参数，GET 就会请求 …/prompt/<提示词>?model=flux-anime&width=1080&…') : null,
           !c.enabled ? h('div', { className: 'ab-note', style: { marginTop: 10 } }, '还没开启。填好接口信息、打开右上角开关并保存后，她就会多一个「画图」能力。') : null,
         ),
-        h(PaintGallery, { draft, setDraft }),
+        h(PaintGallery, { draft, setDraft, toast }),
       )
     }
 
