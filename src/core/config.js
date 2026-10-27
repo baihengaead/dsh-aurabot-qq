@@ -54,6 +54,8 @@ export const DEFAULTS = {
       quality: 'auto', // auto / low / medium / high（2.5 的型号还有 xhigh / max）
       background: 'auto', // auto / transparent / opaque
     },
+    // 画面比例：her = 让她按画面自己定（提示词里带构图描述）；也可以钉死成方图/竖图/横图/宽幅
+    shape: 'her',
     baseUrl: '',
     apiKey: '',
     model: '',
@@ -381,6 +383,8 @@ export function normalize(raw) {
   igx.model = ['gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'].includes(igx.model) ? igx.model : 'gpt-image-2'
   igx.quality = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'].includes(igx.quality) ? igx.quality : 'auto'
   igx.background = ['auto', 'transparent', 'opaque'].includes(igx.background) ? igx.background : 'auto'
+  // 画面比例：her = 她按画面自己定；其余钉死
+  c.imageGen.shape = ['her', 'square', 'portrait', 'landscape', 'wide'].includes(c.imageGen.shape) ? c.imageGen.shape : 'her'
   if (!c.imageGen.custom || typeof c.imageGen.custom !== 'object') c.imageGen.custom = { ...DEFAULTS.imageGen.custom }
   const igc = c.imageGen.custom
   igc.method = String(igc.method || 'GET').toUpperCase() === 'POST' ? 'POST' : 'GET'

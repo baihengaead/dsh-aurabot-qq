@@ -63,12 +63,19 @@ export default {
 
     api.tool(({ chat, sessionId }) => (gen.enabled() && chat.kind !== 'system' ? defineTool({
       name: 'qq_draw_image',
-      description: '画一张图并发到当前 QQ 聊天里。prompt 用中文或英文详细描述画面（主体、动作、场景、风格）。画好会直接发出去，同时把你自己看到的画面告诉你；回复里简单说一两句就行。',
-      properties: { prompt: str('画面描述') },
+      description: '画一张图并发到当前 QQ 聊天里。prompt 用中文或英文详细描述画面（主体、动作、场景、风格）。shape 用来定画面比例：画立绘/壁纸用竖图，画风景/长卷用宽幅，表情/头像用方图；拿不准就不填，按内容自己定。画好会直接发出去，同时把你自己看到的画面告诉你；回复里简单说一两句就行。',
+      properties: {
+        prompt: str('画面描述'),
+        shape: {
+          type: 'string',
+          enum: ['square', 'portrait', 'landscape', 'wide'],
+          description: '画面比例：square 方图 / portrait 竖图 / landscape 横图 / wide 宽幅。不填就按内容自己定',
+        },
+      },
       required: ['prompt'],
-      execute: async ({ prompt }) => {
+      execute: async ({ prompt, shape }) => {
         if (api.config().imageGen.ownerOnly && !hub.turnSendersAllOwner(sessionId)) return { ok: false, message: '画图只给主人画哦' }
-        const buf = await gen.generate(String(prompt || ''))
+        const buf = await gen.generate(String(prompt || ''), { shape: String(shape || '') })
         await hub.sendSegments(chat.chatId, [{ type: 'image', data: { file: 'base64://' + buf.toString('base64') } }], `[生图] ${String(prompt).slice(0, 30)}`)
         const saved = saveImage(buf, String(prompt || ''))
         if (saved) api.log.debug(`生图已存盘：${saved}`)

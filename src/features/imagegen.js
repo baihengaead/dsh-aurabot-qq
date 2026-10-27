@@ -98,27 +98,64 @@ async function valueToBuffer (v) {
   throw new Error('生图接口返回的既不是图片地址也不是图片')
 }
 
+/** 画面比例 → 各家的实际尺寸（OpenAI 兼容 / 自定义接口用） */
+export const SHAPE_SIZE = {
+  square: '1024x1024',
+  portrait: '1024x1536',
+  landscape: '1536x1024',
+  wide: '1536x864',
+}
+
+/**
+ * 画面比例 → 给模型的构图提示。
+ * Codex 订阅那条路**不认 size 参数**（实测请求 1024×1536 也会被它改成自己的尺寸），
+ * 但提示词里的构图描述是认的：写「竖版构图（3:4）」出 1086×1448，写「宽幅（16:9）」出 1672×941。
+ */
+export const SHAPE_HINT = {
+  square: '方版构图（1:1），主体居中',
+  portrait: '竖版构图（3:4），主体居中',
+  landscape: '横版构图（3:2），两侧留出环境',
+  wide: '宽幅横版构图（16:9），两侧留出环境',
+}
+
+/** 这次用哪个比例：她指定的 > 面板默认的（her = 让她自己按画面定）。 */
+export function pickShape (shape, c) {
+  const ok = ['square', 'portrait', 'landscape', 'wide']
+  if (ok.includes(shape)) return shape
+  const def = c && c.shape
+  return ok.includes(def) ? def : 'her'
+}
+
 export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAuth }) {
   const fetch = fetchImpl || ((...a) => globalThis.fetch(...a))
   const auth = codexAuth || createCodexAuth({ log, fetchImpl: fetchImpl })
 
-  async function generate(prompt) {
+  async function generate(prompt, { shape } = {}) {
     const c = getConfig().imageGen
+    const picked = pickShape(shape, c)
+    const size = SHAPE_SIZE[picked] || c.size
+    const hint = SHAPE_HINT[picked] || ''
     // 本地接口接管：用用户自己电脑上的画图服务
     if (local?.active('image')) {
       const { toImageBuffer } = await import('../local/local.js')
       const t = Date.now()
-      const buf = await toImageBuffer(await local.call('image', { prompt: [c.stylePrompt, prompt].filter(Boolean).join('，'), size: c.size }))
+      const buf = await toImageBuffer(await local.call('image', { prompt: [c.stylePrompt, prompt, hint].filter(Boolean).join('，'), size }))
       log.info(`本地画好了一张图（${Math.round(buf.length / 1024)}KB，${Math.round((Date.now() - t) / 1000)}s）：${prompt.slice(0, 40)}`)
       return buf
     }
     if (!c.enabled) throw new Error('生图还没开启')
-    const full = [c.stylePrompt, prompt].filter(Boolean).join('，')
+    let full = [c.stylePrompt, prompt].filter(Boolean).join('，')
     const t = Date.now()
     let buf
-    if (c.provider === 'custom') buf = await viaCustom(c, full)
-    else if (c.provider === 'codex') buf = await viaCodex(c, full)
-    else buf = await viaOpenAI(c, full)
+    if (c.provider === 'custom') buf = await viaCustom(c, full, size)
+    else if (c.provider === 'codex') {
+      // 这条路的 size 不管用，构图要靠提示词
+      if (hint) full += '，' + hint
+      buf = await viaCodex(c, full)
+    } else {
+      full += hint ? '，' + hint : ''
+      buf = await viaOpenAI(c, full, size)
+    }
     if (!buf || !buf.length) throw new Error('生图接口没有返回图片')
     if (!String(mimeOf(buf)).startsWith('image/')) throw new Error('生图接口返回的不是图片')
     log.info(`画好了一张图（${Math.round(buf.length / 1024)}KB，${Math.round((Date.now() - t) / 1000)}s）：${prompt.slice(0, 40)}`)
@@ -126,10 +163,10 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
   }
 
   /** 自定义接口：GET 直接把参数拼在地址上，POST 放进 JSON / 表单。 */
-  async function viaCustom (c, prompt) {
+  async function viaCustom (c, prompt, size) {
     const cp = c.custom || {}
     if (!cp.url) throw new Error('还没填自定义生图接口地址')
-    const req = customRequest(c, prompt)
+    const req = customRequest(size ? { ...c, size } : c, prompt)
     log.info(`生图请求：${req.method} ${req.url.slice(0, 160)}`)
     const r = await fetch(req.url, {
       method: req.method,
@@ -161,7 +198,7 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
       prompt,
       model: String(cx.model || 'gpt-image-2'),
       quality: String(cx.quality || 'auto'),
-      size: String(c.size || '1024x1024'),
+      size: 'auto', // 实测这条端点不认尺寸，改由提示词里的构图描述引导
       background: String(cx.background || 'auto'),
     }
     const once = async (access, accountId) => fetch('https://chatgpt.com/backend-api/codex/images/generations', {
@@ -209,7 +246,7 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
   }
 
   /** OpenAI 兼容接口。 */
-  async function viaOpenAI (c, prompt) {
+  async function viaOpenAI (c, prompt, size) {
     const base = String(c.baseUrl || '').replace(/\/+$/, '')
     if (!base || !c.model) throw new Error('还没填生图服务地址或模型')
     const headers = { 'content-type': 'application/json' }
@@ -217,7 +254,7 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
     const r = await fetch(`${base}/images/generations`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ model: c.model, prompt, size: c.size, n: 1, response_format: 'b64_json', image_size: c.size }),
+      body: JSON.stringify({ model: c.model, prompt, size: size || c.size, n: 1, response_format: 'b64_json', image_size: size || c.size }),
       signal: AbortSignal.timeout(180000),
     })
     const j = await r.json().catch(() => ({}))

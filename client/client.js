@@ -2253,7 +2253,22 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h(Row, { label: '取值路径', hint: '接口直接回图片就留空；回 JSON 时填地址字段' },
               f.text('imageGen.custom.responsePath', { size: 'wide', placeholder: '如 data.0.url（留空自动找）' })),
           )),
-          h(Row, { label: '图片尺寸', hint: isCustom ? '自定义接口里可以用 {size} 或 {width}/{height}' : null }, f.select('imageGen.size', [{ value: '1024x1024', label: '1024 × 1024', desc: '方图' }, { value: '768x1024', label: '768 × 1024', desc: '竖图' }, { value: '1024x768', label: '1024 × 768', desc: '横图' }, { value: '512x512', label: '512 × 512', desc: '小图，更快' }], { width: 200 })),
+          h(Row, { label: '构图', hint: '画面比例。Codex 订阅这条路不认尺寸参数（实测会被忽略），靠描述里的构图来引导 —— 实测有效' },
+            f.select('imageGen.shape', [
+              { value: 'her', label: '让她自己定', desc: '她按画面内容选比例' },
+              { value: 'square', label: '方图 1:1' },
+              { value: 'portrait', label: '竖图 3:4' },
+              { value: 'landscape', label: '横图 3:2' },
+              { value: 'wide', label: '宽幅 16:9' },
+            ], { width: 200 })),
+          !isCodex && (c.shape || 'her') === 'her'
+            ? h(Row, { label: '图片尺寸', hint: isCustom ? '自定义接口里可以用 {size} 或 {width}/{height}' : '选了「让她自己定」时用这个兜底' },
+              f.select('imageGen.size', [
+                { value: '1024x1024', label: '1024 × 1024', desc: '方图' },
+                { value: '1024x1536', label: '1024 × 1536', desc: '竖图' },
+                { value: '1536x1024', label: '1536 × 1024', desc: '横图' },
+              ], { width: 200 }))
+            : null,
           h(Row, { label: '固定风格', hint: '每次画都会加在描述前面' }, f.text('imageGen.stylePrompt', { size: 'wide', placeholder: '例如：日系二次元，柔和光线，蓝白配色' })),
           h(Row, { label: '只给主人画', hint: '关掉后群友也能让她画（会花你的额度）' }, f.sw('imageGen.ownerOnly')),
           h(Row, { label: '画完自己看一眼', hint: '多调用一次模型，让她知道自己画成了什么；模型看不了图会自动跳过' }, f.sw('imageGen.seeOwn')),
