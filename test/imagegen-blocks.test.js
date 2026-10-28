@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 const { drawResultBlocks, imageToolBlock, drawToolMessage, createImageGen } = await import('../src/features/imagegen.js')
-const { shrinkImage } = await import('../src/core/img.js')
+const { shrinkImage, shrinkWithSharp, findSharp } = await import('../src/core/img.js')
 const { defineTool } = await import('../src/tools/tools.js')
 
 test('drawResultBlocks：有图时文字 + image 块，没图时只有文字', () => {
@@ -49,6 +49,28 @@ test('imageToolBlock：小图登记成附件块；没附件服务 / 登记失败
 test('shrinkImage：没有 ffmpeg 时安静返回 null', async () => {
   const buf = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
   assert.equal(await shrinkImage(buf, 512, 'definitely-not-a-real-ffmpeg', { timeoutMs: 800 }), null)
+})
+
+test('sharp 缩图：可用时输出 JPEG，不可用或出错返回 null', async () => {
+  const calls = []
+  const fake = (input) => ({
+    rotate: () => calls.push(['rotate', input.length]) && fake(input),
+    resize: (o) => { calls.push(['resize', o.width, o.fit]); return fake(input) },
+    jpeg: (o) => { calls.push(['jpeg', o.quality]); return fake(input) },
+    toBuffer: async () => Buffer.from('small-jpeg'),
+  })
+  assert.deepEqual(await shrinkWithSharp(fake, Buffer.alloc(2048), 1024), Buffer.from('small-jpeg'))
+  assert.ok(calls.some((c) => c[0] === 'resize' && c[1] === 1024))
+  assert.equal(await shrinkWithSharp(null, Buffer.alloc(2048), 1024), null, '没有 sharp 就返回 null')
+  const broken = () => ({ rotate: () => broken(), resize: () => broken(), jpeg: () => broken(), toBuffer: async () => { throw new Error('坏图') } })
+  assert.equal(await shrinkWithSharp(broken, Buffer.alloc(2048), 1024), null, '缩图报错不抛给调用方')
+})
+
+test('findSharp：从宿主 asar 目录找 sharp，找不到返回 null', async () => {
+  const seen = []
+  const importer = async (u) => { seen.push(u); throw new Error('nope') }
+  assert.equal(await findSharp({ resourcesPath: 'C:/nope/resources', importer }), null)
+  assert.ok(seen[0] === 'sharp')
 })
 
 test('缩图进程提前退出时不让 stdin 错误终止宿主', async () => {

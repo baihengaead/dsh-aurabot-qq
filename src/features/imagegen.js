@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { fetchImage } from '../core/net.js'
 import { mimeOf } from '../chat/inbound.js'
 import { askModel, canSeeImages } from '../core/llm.js'
-import { findFfmpeg, shrinkImage } from '../core/img.js'
+import { findFfmpeg, findSharp, shrinkImage, shrinkWithSharp } from '../core/img.js'
 import { createCodexAuth } from './codex-auth.js'
 
 // 工具结果里带的图超过这个大小就先缩一下：2MB 的图直接塞进上下文会把下一轮请求搞挂
@@ -265,7 +265,8 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
     if (!r.ok) throw new Error(j?.error?.message || j?.message || `HTTP ${r.status}`)
     const item = (j.data || j.images || [])[0] || {}
     if (item.b64_json) return Buffer.from(item.b64_json, 'base64')
-    if (item.url) return fetchImage(item.url, { maxBytes: 20 * 1024 * 1024, allowLocal: false })
+    // 有的服务返回 CDN 链接，下载可能要几十秒（实测 22 秒），默认 20 秒会误判成失败
+    if (item.url) return fetchImage(item.url, { maxBytes: 20 * 1024 * 1024, allowLocal: false, timeoutMs: 120000 })
     // 有的服务把地址放在别处，兜一下
     const v = findImage(j)
     if (v) return valueToBuffer(v)
@@ -370,7 +371,9 @@ export async function imageToolBlock (dsh, buf, { ffmpegPath = '', maxSide = 102
   let mediaType = mimeOf(buf)
   if (buf.length > maxBytes) {
     const ffmpeg = findFfmpeg(ffmpegPath)
-    const small = ffmpeg ? await shrinkImage(buf, maxSide, ffmpeg) : null
+    let small = ffmpeg ? await shrinkImage(buf, maxSide, ffmpeg) : null
+    // 没装 ffmpeg 时用 DSH 自带的 sharp（libvips），用户不必额外安装
+    if (!small) small = await shrinkWithSharp(await findSharp(), buf, maxSide)
     if (!small || small.length > maxBytes) {
       log?.debug?.(`生图 ${Math.round(buf.length / 1024)}KB 太大又缩不了，工具结果里就不带图了`)
       return null

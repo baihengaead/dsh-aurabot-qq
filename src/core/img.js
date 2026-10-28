@@ -3,6 +3,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 const EXE = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
 
@@ -23,6 +24,45 @@ export function findFfmpeg(configured = '', { pathEnv = process.env.PATH || '', 
  * 把图缩到 maxSide 以内，输出 JPEG（走 stdin/stdout，不落临时文件）。
  * 失败 / 没 ffmpeg 返回 null，不抛。
  */
+/**
+ * 找宿主自带的 sharp：先在插件自己能解析的地方找，再找 DSH（Electron）的 app.asar。
+ * 找到了就用它缩图，用户不必另外装 ffmpeg。找不到返回 null。
+ */
+export async function findSharp({ resourcesPath = process.resourcesPath, importer = (u) => import(u) } = {}) {
+  try {
+    const m = await importer('sharp')
+    if (m) return m.default || m
+  } catch (error) {}
+  const cands = resourcesPath ? [
+    join(resourcesPath, 'app.asar', 'dsh', 'node_modules', 'sharp', 'dist', 'index.mjs'),
+    join(resourcesPath, 'dsh', 'node_modules', 'sharp', 'dist', 'index.mjs'),
+    join(resourcesPath, 'app', 'node_modules', 'sharp', 'dist', 'index.mjs'),
+  ] : []
+  for (const file of cands) {
+    if (!existsSync(file)) continue
+    try {
+      const m = await importer(pathToFileURL(file).href)
+      if (m) return m.default || m
+    } catch (error) {}
+  }
+  return null
+}
+
+/** 用 sharp 缩图（输出 JPEG）；sharp 不可用或出错返回 null，不抛。 */
+export async function shrinkWithSharp(sharp, buf, maxSide) {
+  if (typeof sharp !== 'function') return null
+  try {
+    const out = await sharp(buf)
+      .rotate()
+      .resize({ width: maxSide, height: maxSide, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 82 })
+      .toBuffer()
+    return Buffer.isBuffer(out) && out.length ? out : null
+  } catch (error) {
+    return null
+  }
+}
+
 export function shrinkImage(buf, maxSide, ffmpeg, { timeoutMs = 30000 } = {}) {
   if (!ffmpeg) return Promise.resolve(null)
   return new Promise((resolve) => {
