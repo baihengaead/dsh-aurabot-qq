@@ -2,7 +2,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { createImageGen, drawResultBlocks } from '../../features/imagegen.js'
+import { createImageGen, drawResultBlocks, drawToolMessage } from '../../features/imagegen.js'
 import { listPaintings, openPaintFolder, paintingPath, removePainting } from '../../features/paintings.js'
 import { defineTool, str } from '../../tools/tools.js'
 import { dataDir } from '../../core/store.js'
@@ -92,7 +92,7 @@ export default {
         },
       },
       required: ['prompt'],
-      // 能看图时工具结果里带原图（image 块），她当轮就能看见自己画了什么
+      // 允许看图时工具结果里带原图（附件块），她当轮就能看见自己画了什么
       render: drawResultBlocks,
       execute: async ({ prompt, shape }) => {
         if (api.config().imageGen.ownerOnly && !hub.turnSendersAllOwner(sessionId)) return { ok: false, message: '画图只给主人画哦' }
@@ -100,14 +100,18 @@ export default {
         await hub.sendSegments(chat.chatId, [{ type: 'image', data: { file: 'base64://' + buf.toString('base64') } }], `[生图] ${String(prompt).slice(0, 30)}`)
         const saved = saveImage(buf, String(prompt || ''))
         if (saved) api.log.debug(`生图已存盘：${saved}`)
-        // 「画完自己看一眼」：多调一次模型，把画面描述成文字（写进这一轮的结果 + 记忆）
-        const seen = await gen.look(buf, String(prompt || ''))
+
+        // 「画完自己看一眼」是总开关：关掉就当没视觉能力处理 —— 既不给图，也不调模型看图。
+        // 不然会出现「模型能看图、图也塞了、但没描述」的模糊中间态（#37 反馈）。
+        const visual = await gen.canSee()
+        const seeOwn = api.config().imageGen.seeOwn !== false
+        const allowLook = visual && seeOwn
+        const seen = allowLook ? await gen.look(buf, String(prompt || '')) : ''
+
         memory.addEvent?.({ text: `画了一张图：${String(prompt).slice(0, 40)}`, about: chat.kind === 'private' ? chat.userId : '', tags: ['画画'], importance: 0.4 })
-        const where = saved ? `（存在 ${saved}，你想看可以自己读它）` : ''
-        const out = { ok: true, message: seen ? `画好发出去了${where}。你自己看到的画面：${seen}` : `画好发出去了${where}` }
-        // 只有明确能看图的模型才把图交给它；纯文本模型只拿文字，不会崩。
+        const out = { ok: true, message: drawToolMessage({ saved, seen, visual, seeOwn }) }
         // 图要先缩、再登记成 DSH 附件块 —— 直接塞 base64 会让下一轮请求整轮失败（实测）
-        if (await gen.canSee()) {
+        if (allowLook) {
           const img = await gen.toolImage(buf)
           if (img) out.image = img
           else api.log.debug('这次生图没把图交给模型（缩图/登记失败），只给文字')

@@ -354,6 +354,21 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
 }
 
 /**
+ * qq_draw_image 工具结果里那句话。三种情况分别说清楚，别让她瞎猜画面里有什么：
+ * - 看过（有描述）：把描述带回去
+ * - 能看图但「画完自己看一眼」关着：这次没给图，别描述
+ * - 模型看不了图：明确说看不了
+ */
+export function drawToolMessage ({ saved = '', seen = '', visual = false, seeOwn = true } = {}) {
+  const file = saved ? `（存在 ${saved}，你想看可以自己读它）` : ''
+  const bare = saved ? `（存在 ${saved}）` : ''
+  if (seen) return `画好发出去了${file}。你自己看到的画面：${seen}`
+  if (!visual) return `画好发出去了${bare}。你现在的模型看不了图，别描述画面里有什么`
+  if (!seeOwn) return `画好发出去了${file}。这次没把图给你看，别描述画面里有什么`
+  return `画好发出去了${file}`
+}
+
+/**
  * qq_draw_image 的工具结果怎么渲染：一行文字 +（有图时）image 块。
  * image 一般是 DSH 附件块（toolImage() 登记过的），原样透传；没图就只回文字。
  */

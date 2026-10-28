@@ -577,15 +577,16 @@ test('生图工具结果：能看图时带 image 块，纯文本模型只给文�
   assert.equal(blocks[1].type, 'image')
   assert.match(withImg.message, /你自己看到的画面/, '「画完看一眼」开着时会多一段描述')
 
-  // 关掉「画完看一眼」：仍然给原图，但不再多一段描述
+  // 关掉「画完自己看一眼」= 当没视觉能力处理：不给图、不描述
   const noLook = await draw('on', false)
-  assert.ok(noLook.image, '还是给原图')
+  assert.equal(noLook.image, undefined, '关掉看一眼就不该塞图')
   assert.doesNotMatch(noLook.message || '', /你自己看到的画面/)
+  assert.match(noLook.message || '', /没把图给你看/)
 
-  // 手动声明「不支持」：纯文本模型，绝不能塞 image 块
+  // 手动声明「不支持」：纯文本模型，绝不能塞 image 块，而且要如实说看不了
   const noImg = await draw('off')
   assert.equal(noImg.image, undefined, '纯文本模型不应该拿到 image 块')
-  assert.equal(typeof noImg.message, 'string')
+  assert.match(noImg.message || '', /看不了图/)
 
   // 恢复默认：auto + 看一眼
   await fake.call('/save', { model: { vision: 'auto' }, imageGen: { seeOwn: true } })

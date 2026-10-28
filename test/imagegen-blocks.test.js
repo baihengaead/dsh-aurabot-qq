@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-const { drawResultBlocks, createImageGen } = await import('../src/features/imagegen.js')
+const { drawResultBlocks, createImageGen, drawToolMessage } = await import('../src/features/imagegen.js')
 const { shrinkImage } = await import('../src/core/img.js')
 const { defineTool } = await import('../src/tools/tools.js')
 
@@ -28,6 +28,19 @@ test('drawResultBlocks：有图时文字 + image 块，没图时只有文字', (
 
   const bad = drawResultBlocks({}, { ok: false, message: '生图服务没配' })
   assert.deepEqual(bad, [{ type: 'text', text: '✗ 生图服务没配' }])
+})
+
+test('drawToolMessage：三种情况说清楚，别让她瞎猜画面', () => {
+  const saved = 'C:/x/a.png'
+  // 看过：带描述
+  assert.match(drawToolMessage({ saved, seen: '一只橘猫', visual: true, seeOwn: true }), /你自己看到的画面：一只橘猫/)
+  // 能看图但没让它看：明确说没给图
+  assert.match(drawToolMessage({ saved, seen: '', visual: true, seeOwn: false }), /没把图给你看/)
+  assert.doesNotMatch(drawToolMessage({ saved, seen: '', visual: true, seeOwn: false }), /你自己看到的画面/)
+  // 模型看不了图：明确说看不了
+  assert.match(drawToolMessage({ saved, seen: '', visual: false, seeOwn: true }), /看不了图/)
+  // 都没有存盘路径时也不能崩
+  assert.match(drawToolMessage({}), /画好发出去了/)
 })
 
 test('toolImage：小图登记成附件块；没附件服务 / 登记失败 → null', async () => {
