@@ -982,11 +982,11 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       // 视觉能力：自动时把 DSH 的声明显示出来，主人一眼能看出会不会降级
       const autoVision = curModel ? curModel.vision : undefined
       const visionHint = draft.model.vision === 'on'
-        ? '强制当「能看图」；模型其实看不了的话，带图的那一轮会报错'
+        ? '强制当「能看图」；模型其实看不了的话，带图的那一轮会报错。生图后也会把原图回传给她'
         : draft.model.vision === 'off'
-          ? '强制当「看不懂」：收到图片只给一行文字提示，不会把图塞给模型'
+          ? '强制当「看不懂」：收到图片只给一行文字提示，不会把图塞给模型；生完图也只给她文字'
           : autoVision === true
-            ? '自动：DSH 说这个模型支持看图'
+            ? '自动：DSH 说这个模型支持看图（生图后会把原图回传给她）'
             : autoVision === false
               ? '自动：DSH 说这个模型看不了图，会自动降级成文字提示'
               : '自动：DSH 没声明，默认照发；真看不了就手动选「不支持」'
@@ -2296,7 +2296,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             : null,
           h(Row, { label: '固定风格', hint: '每次画都会加在描述前面' }, f.text('imageGen.stylePrompt', { size: 'wide', placeholder: '例如：日系二次元，柔和光线，蓝白配色' })),
           h(Row, { label: '只给主人画', hint: '关掉后群友也能让她画（会花你的额度）' }, f.sw('imageGen.ownerOnly')),
-          h(Row, { label: '画完自己看一眼', hint: '多调用一次模型，让她知道自己画成了什么；模型看不了图会自动跳过' }, f.sw('imageGen.seeOwn')),
+          h(Row, { label: '画完自己看一眼', hint: '多调一次模型，把画面写成文字（下一轮也记得）；能看图的模型本来就会直接收到原图，关掉只省这一次调用' }, f.sw('imageGen.seeOwn')),
           isCustom ? h('div', { className: 'ab-note', style: { marginTop: 10 } }, '例子：地址填 https://image.pollinations.ai/prompt/{prompt}，再加 model=flux-anime、width=1080、height=1920、nologo=true 四个参数，GET 就会请求 …/prompt/<提示词>?model=flux-anime&width=1080&…') : null,
           !c.enabled ? h('div', { className: 'ab-note', style: { marginTop: 10 } }, '还没开启。填好接口信息、打开右上角开关并保存后，她就会多一个「画图」能力。') : null,
         ),

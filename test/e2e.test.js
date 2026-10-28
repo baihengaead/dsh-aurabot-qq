@@ -541,6 +541,51 @@ test('生图：主人让她画图，调生图服务并把图发出去', async ()
   assert.equal(st.config.imageGen.apiKeySet, true)
 })
 
+test('生图工具结果：能看图时带 image 块，纯文本模型只给文字（#37）', async () => {
+  const http = await import('node:http')
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+  const srv = http.createServer(async (req, res) => {
+    for await (const _ of req) { /* 读完请求体 */ }
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }))
+  })
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r))
+  const baseUrl = `http://127.0.0.1:${srv.address().port}/v1`
+  const lastDraw = () => fake.turns.at(-1)?.toolCalls?.find((c) => c.name === 'qq_draw_image')?.result
+  const draw = async (vision, seeOwn = true) => {
+    await fake.call('/save', {
+      model: { vision },
+      imageGen: { enabled: true, baseUrl, model: 'test-model', apiKey: 'img-key-123456', seeOwn },
+    })
+    const n = sentTo('private', OWNER).length
+    mock.push(priv(OWNER, text('画一只鲸鱼')))
+    await until(() => sentTo('private', OWNER).slice(n).some((c) => c.params.message[0].type === 'image'), 10000)
+    await until(() => lastDraw(), 10000)
+    return lastDraw()
+  }
+
+  // 手动声明「支持」：工具结果里要有原图 image 块（base64 原样回来）
+  const withImg = await draw('on')
+  assert.ok(withImg.image, '能看图的模型应拿到 image')
+  assert.equal(withImg.image.mediaType, 'image/png')
+  assert.equal(withImg.image.data, png.toString('base64'))
+  assert.match(withImg.message, /你自己看到的画面/, '「画完看一眼」开着时会多一段描述')
+
+  // 关掉「画完看一眼」：仍然给原图，但不再多一段描述
+  const noLook = await draw('on', false)
+  assert.ok(noLook.image, '还是给原图')
+  assert.doesNotMatch(noLook.message || '', /你自己看到的画面/)
+
+  // 手动声明「不支持」：纯文本模型，绝不能塞 image 块
+  const noImg = await draw('off')
+  assert.equal(noImg.image, undefined, '纯文本模型不应该拿到 image 块')
+  assert.equal(typeof noImg.message, 'string')
+
+  // 恢复默认：auto + 看一眼
+  await fake.call('/save', { model: { vision: 'auto' }, imageGen: { seeOwn: true } })
+  srv.close()
+})
+
 test('每日整理：往日的临时流水整理后清空，今天的保留；空间日记进了记忆库', async () => {
   const { existsSync } = await import('node:fs')
   const dir = join(dataDir, 'chatlog')

@@ -2,7 +2,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { createImageGen } from '../../features/imagegen.js'
+import { createImageGen, drawResultBlocks } from '../../features/imagegen.js'
 import { listPaintings, openPaintFolder, paintingPath, removePainting } from '../../features/paintings.js'
 import { defineTool, str } from '../../tools/tools.js'
 import { dataDir } from '../../core/store.js'
@@ -82,7 +82,7 @@ export default {
 
     api.tool(({ chat, sessionId }) => (gen.enabled() && chat.kind !== 'system' ? defineTool({
       name: 'qq_draw_image',
-      description: '画一张图并发到当前 QQ 聊天里。prompt 用中文或英文详细描述画面（主体、动作、场景、风格）。shape 用来定画面比例：画立绘/壁纸用竖图，画风景/长卷用宽幅，表情/头像用方图；拿不准就不填，按内容自己定。画好会直接发出去，同时把你自己看到的画面告诉你；回复里简单说一两句就行。',
+      description: '画一张图并发到当前 QQ 聊天里。prompt 用中文或英文详细描述画面（主体、动作、场景、风格）。shape 用来定画面比例：画立绘/壁纸用竖图，画风景/长卷用宽幅，表情/头像用方图；拿不准就不填，按内容自己定。画好会直接发出去；你自己能看图时会把原图一并给你，不能看图时给你一段画面描述。回复里简单说一两句就行。',
       properties: {
         prompt: str('画面描述'),
         shape: {
@@ -92,17 +92,22 @@ export default {
         },
       },
       required: ['prompt'],
+      // 能看图时工具结果里带原图（image 块），她当轮就能看见自己画了什么
+      render: drawResultBlocks,
       execute: async ({ prompt, shape }) => {
         if (api.config().imageGen.ownerOnly && !hub.turnSendersAllOwner(sessionId)) return { ok: false, message: '画图只给主人画哦' }
         const buf = await gen.generate(String(prompt || ''), { shape: String(shape || '') })
         await hub.sendSegments(chat.chatId, [{ type: 'image', data: { file: 'base64://' + buf.toString('base64') } }], `[生图] ${String(prompt).slice(0, 30)}`)
         const saved = saveImage(buf, String(prompt || ''))
         if (saved) api.log.debug(`生图已存盘：${saved}`)
-        // 自己回头看一眼：这样她才知道自己画成了什么，用户问「画得怎么样」时有话说
+        // 「画完自己看一眼」：多调一次模型，把画面描述成文字（写进这一轮的结果 + 记忆）
         const seen = await gen.look(buf, String(prompt || ''))
         memory.addEvent?.({ text: `画了一张图：${String(prompt).slice(0, 40)}`, about: chat.kind === 'private' ? chat.userId : '', tags: ['画画'], importance: 0.4 })
         const where = saved ? `（存在 ${saved}，你想看可以自己读它）` : ''
-        return { ok: true, message: seen ? `画好发出去了${where}。你自己看到的画面：${seen}` : `画好发出去了${where}` }
+        const out = { ok: true, message: seen ? `画好发出去了${where}。你自己看到的画面：${seen}` : `画好发出去了${where}` }
+        // 只有明确能看图的模型才把原图塞进工具结果；纯文本模型只拿文字，不会崩
+        if (await gen.canSee()) out.image = { data: buf.toString('base64'), mediaType: mimeOf(buf) }
+        return out
       },
     }) : []))
     return gen

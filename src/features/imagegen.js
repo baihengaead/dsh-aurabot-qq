@@ -297,6 +297,15 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
     }
   }
 
+  /**
+   * 当前模型能不能看图：面板「视觉能力」手动声明优先，其次看 DSH 声明的元数据。
+   * 只有明确能看图才返回 true —— 拿不准就当不能，别把纯文本模型搞崩。
+   */
+  async function canSee () {
+    if (!dsh) return false
+    return (await canSeeImages(dsh, getConfig())) === true
+  }
+
   const enabled = () => {
     if (local?.active('image')) return true
     const c = getConfig().imageGen
@@ -305,5 +314,18 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
     return c.provider === 'custom' ? Boolean(c.custom && c.custom.url) : Boolean(c.baseUrl && c.model)
   }
 
-  return { generate, look, enabled, codexAuth: auth }
+  return { generate, look, canSee, enabled, codexAuth: auth }
+}
+
+/**
+ * qq_draw_image 的工具结果怎么渲染：一行文字 +（模型能看图时）原图的 image 块。
+ * DSH 会把 image 块当上下文交给模型，这样她当轮就能看到自己画的图；
+ * 纯文本模型拿了 image 块会出问题，所以调用方只在 canSee() 为真时才塞 image。
+ */
+export function drawResultBlocks (_args, value) {
+  const text = value && value.ok === false ? '✗ ' + (value.message || '没成功') : (value && value.message) || '✓'
+  const blocks = [{ type: 'text', text }]
+  const img = value && value.image
+  if (img && img.data) blocks.push({ type: 'image', data: img.data, mediaType: img.mediaType || 'image/png' })
+  return blocks
 }
