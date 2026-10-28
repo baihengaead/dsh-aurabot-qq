@@ -19,6 +19,19 @@ async function until(fn, ms = 8000) {
   }
   throw new Error('等不到条件成立')
 }
+/**
+ * 等网关安静下来再开始计数：上一个用例的回复有时还没发完，
+ * 会被算进下一个用例的「发送条数」里（空间日记那条用例年年偶发就是这个）。
+ */
+async function settle(quietMs = 300) {
+  let last = mock.calls.length
+  let quiet = 0
+  while (quiet < quietMs) {
+    await sleep(50)
+    if (mock.calls.length === last) quiet += 50
+    else { last = mock.calls.length; quiet = 0 }
+  }
+}
 
 function fakePng(w, h, salt = 0) {
   const b = Buffer.alloc(64 + salt)
@@ -410,6 +423,7 @@ test('听语音：收到语音先转文字再交给她', async () => {
 })
 
 test('空间日记：手动写一篇（仅自己可见），不往聊天里发，然后删除', async () => {
+  await settle() // 上一个用例的回复可能还没发完，别算到日记头上
   const before = mock.calls.filter((c) => c.action.startsWith('send_') && c.action.endsWith('_msg') && c.action !== 'send_qzone_msg').length
   const r = (await fake.call('/diary/run', { visibility: 'self' })).json()
   assert.equal(r.ok, true, r.message)
