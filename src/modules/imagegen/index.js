@@ -105,8 +105,13 @@ export default {
         memory.addEvent?.({ text: `画了一张图：${String(prompt).slice(0, 40)}`, about: chat.kind === 'private' ? chat.userId : '', tags: ['画画'], importance: 0.4 })
         const where = saved ? `（存在 ${saved}，你想看可以自己读它）` : ''
         const out = { ok: true, message: seen ? `画好发出去了${where}。你自己看到的画面：${seen}` : `画好发出去了${where}` }
-        // 只有明确能看图的模型才把原图塞进工具结果；纯文本模型只拿文字，不会崩
-        if (await gen.canSee()) out.image = { data: buf.toString('base64'), mediaType: mimeOf(buf) }
+        // 只有明确能看图的模型才把图交给它；纯文本模型只拿文字，不会崩。
+        // 图要先缩、再登记成 DSH 附件块 —— 直接塞 base64 会让下一轮请求整轮失败（实测）
+        if (await gen.canSee()) {
+          const img = await gen.toolImage(buf)
+          if (img) out.image = img
+          else api.log.debug('这次生图没把图交给模型（缩图/登记失败），只给文字')
+        }
         return out
       },
     }) : []))

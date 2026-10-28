@@ -564,11 +564,17 @@ test('生图工具结果：能看图时带 image 块，纯文本模型只给文�
     return lastDraw()
   }
 
-  // 手动声明「支持」：工具结果里要有原图 image 块（base64 原样回来）
+  // 手动声明「支持」：工具结果里要有图，而且是登记过的附件块
+  // （直接塞 base64 会让下一轮请求整轮失败，见 imagegen 的 toolImage 注释）
   const withImg = await draw('on')
   assert.ok(withImg.image, '能看图的模型应拿到 image')
+  assert.equal(withImg.image.type, 'image')
+  assert.ok(withImg.image.attachment?.attachmentId, '要登记成附件块')
   assert.equal(withImg.image.mediaType, 'image/png')
-  assert.equal(withImg.image.data, png.toString('base64'))
+  assert.equal(withImg.image.data, undefined, '不要裸 base64')
+  const blocks = (await import('../src/features/imagegen.js')).drawResultBlocks({}, withImg)
+  assert.equal(blocks.length, 2)
+  assert.equal(blocks[1].type, 'image')
   assert.match(withImg.message, /你自己看到的画面/, '「画完看一眼」开着时会多一段描述')
 
   // 关掉「画完看一眼」：仍然给原图，但不再多一段描述

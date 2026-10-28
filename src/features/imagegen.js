@@ -8,7 +8,11 @@ import { randomUUID } from 'node:crypto'
 import { fetchImage } from '../core/net.js'
 import { mimeOf } from '../chat/inbound.js'
 import { askModel, canSeeImages } from '../core/llm.js'
+import { findFfmpeg, shrinkImage } from '../core/img.js'
 import { createCodexAuth } from './codex-auth.js'
+
+// 工具结果里带的图超过这个大小就先缩一下：2MB 的图直接塞进上下文会把下一轮请求搞挂
+const TOOL_IMAGE_MAX_BYTES = 500 * 1024
 
 /** 把模板里的 {占位符} 替换掉；不认识的占位符原样留着。 */
 function fill (tpl, vars) {
@@ -306,6 +310,38 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
     return (await canSeeImages(dsh, getConfig())) === true
   }
 
+  /**
+   * 工具结果里要带的那张图：太大的先缩图，再交给 DSH 的附件服务登记成附件块。
+   * ⚠ 必须走附件服务：适配层只认附件块，直接把 base64 塞进工具结果会让下一轮请求整轮失败
+   * （实测 2MB 的图直接塞进去 → "DeepSeek Messages transport failed"，重试 5 次全挂）。
+   * 缩图或登记失败都返回 null —— 只给文字，宁可少给也不要崩。
+   */
+  async function toolImage (buf) {
+    if (!dsh) return null
+    let data = buf
+    let mediaType = mimeOf(buf)
+    if (buf.length > TOOL_IMAGE_MAX_BYTES) {
+      const ffmpeg = findFfmpeg(getConfig().bili && getConfig().bili.ffmpegPath)
+      const small = ffmpeg ? await shrinkImage(buf, 1024, ffmpeg) : null
+      if (!small) {
+        log.debug(`生图 ${Math.round(buf.length / 1024)}KB 太大又缩不了，工具结果里就不带图了`)
+        return null
+      }
+      log.debug(`工具结果里的图缩到 ${Math.round(small.length / 1024)}KB（原 ${Math.round(buf.length / 1024)}KB）`)
+      data = small
+      mediaType = 'image/jpeg'
+    }
+    const att = dsh.attachments || (typeof dsh.get === 'function' ? dsh.get('attachments') : null)
+    if (!att || typeof att.admitPromptContent !== 'function') return null
+    try {
+      const [block] = await att.admitPromptContent([{ type: 'image', data: data.toString('base64'), mediaType }])
+      if (block && block.type === 'image') return block
+    } catch (error) {
+      log.debug('生图的图登记成附件失败：', error.message)
+    }
+    return null
+  }
+
   const enabled = () => {
     if (local?.active('image')) return true
     const c = getConfig().imageGen
@@ -314,18 +350,18 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
     return c.provider === 'custom' ? Boolean(c.custom && c.custom.url) : Boolean(c.baseUrl && c.model)
   }
 
-  return { generate, look, canSee, enabled, codexAuth: auth }
+  return { generate, look, canSee, toolImage, enabled, codexAuth: auth }
 }
 
 /**
- * qq_draw_image 的工具结果怎么渲染：一行文字 +（模型能看图时）原图的 image 块。
- * DSH 会把 image 块当上下文交给模型，这样她当轮就能看到自己画的图；
- * 纯文本模型拿了 image 块会出问题，所以调用方只在 canSee() 为真时才塞 image。
+ * qq_draw_image 的工具结果怎么渲染：一行文字 +（有图时）image 块。
+ * image 一般是 DSH 附件块（toolImage() 登记过的），原样透传；没图就只回文字。
  */
 export function drawResultBlocks (_args, value) {
   const text = value && value.ok === false ? '✗ ' + (value.message || '没成功') : (value && value.message) || '✓'
   const blocks = [{ type: 'text', text }]
   const img = value && value.image
-  if (img && img.data) blocks.push({ type: 'image', data: img.data, mediaType: img.mediaType || 'image/png' })
+  if (img && (img.attachment || img.data)) blocks.push({ ...img, type: 'image' })
   return blocks
 }
+

@@ -5,25 +5,13 @@
 // 不影响原来「标题 + 简介 + 字幕 + 热评」的文本流程。
 
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { UA } from './api.js'
 import { askModel } from '../core/llm.js'
+import { findFfmpeg } from '../core/img.js'
 
-const EXE = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
-
-/** ffmpeg 在哪：配置里填的 > PATH 里的 > 几个常见安装位置。找不到返回 ''。 */
-export function findFfmpeg(configured = '', { pathEnv = process.env.PATH || '', exists = existsSync } = {}) {
-  const sep = process.platform === 'win32' ? ';' : ':'
-  const cands = []
-  const own = String(configured || '').trim()
-  if (own) cands.push(own)
-  for (const d of String(pathEnv).split(sep)) if (d && d.trim()) cands.push(join(d.trim(), EXE))
-  if (process.platform === 'win32') cands.push('C:\\ffmpeg\\bin\\ffmpeg.exe', 'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe')
-  else cands.push('/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/opt/homebrew/bin/ffmpeg')
-  for (const c of cands) { try { if (exists(c)) return c } catch (error) {} }
-  return ''
-}
+// ffmpeg 的查找已经抽到 core/img.js（生图那边也要用），这里保留导出，老的引用不受影响
+export { findFfmpeg }
 
 /** 抽帧时间点（秒）：跳过开头结尾各 5%，中间均匀铺开。 */
 export function frameTimes(durationSec, count) {

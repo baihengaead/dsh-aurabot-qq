@@ -3,29 +3,49 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 const { drawResultBlocks, createImageGen } = await import('../src/features/imagegen.js')
+const { shrinkImage } = await import('../src/core/img.js')
 const { defineTool } = await import('../src/tools/tools.js')
 
 const silent = { info () {}, warn () {}, debug () {}, error () {} }
 
-test('drawResultBlocks：能看图时文字 + image 块，否则只有文字', () => {
-  const png = { data: 'iVBORw0KGgo=', mediaType: 'image/png' }
-  const withImg = drawResultBlocks({}, { ok: true, message: '画好发出去了', image: png })
+test('drawResultBlocks：有图时文字 + image 块，没图时只有文字', () => {
+  // 正常走的是 DSH 附件块（toolImage() 登记过），要原样透传
+  const attachment = { type: 'image', attachment: { attachmentId: 'att-1' }, mediaType: 'image/png' }
+  const withImg = drawResultBlocks({}, { ok: true, message: '画好发出去了', image: attachment })
   assert.equal(withImg.length, 2)
   assert.deepEqual(withImg[0], { type: 'text', text: '画好发出去了' })
-  assert.deepEqual(withImg[1], { type: 'image', data: png.data, mediaType: 'image/png' })
+  assert.deepEqual(withImg[1], attachment, '附件块原样进工具结果')
+
+  // 没登记过的裸 data 也认（老的调用方式/测试）
+  const raw = drawResultBlocks({}, { ok: true, message: 'x', image: { data: 'AA', mediaType: 'image/jpeg' } })
+  assert.deepEqual(raw[1], { type: 'image', data: 'AA', mediaType: 'image/jpeg' })
 
   const noImg = drawResultBlocks({}, { ok: true, message: '画好发出去了' })
   assert.deepEqual(noImg, [{ type: 'text', text: '画好发出去了' }], '纯文本模型只有文字，不能出现 image 块')
 
-  // 形状不对（比如 base64 丢了）也别硬塞 image 块
+  // 形状不对（既没 attachment 也没 data）别硬塞 image 块
   assert.deepEqual(drawResultBlocks({}, { ok: true, message: 'x', image: { mediaType: 'image/png' } }), [{ type: 'text', text: 'x' }])
 
   const bad = drawResultBlocks({}, { ok: false, message: '生图服务没配' })
   assert.deepEqual(bad, [{ type: 'text', text: '✗ 生图服务没配' }])
+})
 
-  // 默认 mediaType
-  const noType = drawResultBlocks({}, { ok: true, message: 'x', image: { data: 'AA' } })
-  assert.equal(noType[1].mediaType, 'image/png')
+test('toolImage：小图登记成附件块；没附件服务 / 登记失败 → null', async () => {
+  const buf = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+  const cfg = { model: { provider: 'p', model: 'm', vision: 'on' }, imageGen: { enabled: true }, bili: {} }
+  const make = (dsh) => createImageGen({ getConfig: () => cfg, log: silent, local: { active: () => false }, dsh, codexAuth: { status: () => ({ loggedIn: false }) } })
+
+  const ok = make({ attachments: { admitPromptContent: async ([b]) => [{ type: 'image', attachment: { attachmentId: 'att-9' }, mediaType: b.mediaType }] } })
+  assert.deepEqual(await ok.toolImage(buf), { type: 'image', attachment: { attachmentId: 'att-9' }, mediaType: 'image/png' })
+
+  assert.equal(await make({}).toolImage(buf), null, '没有附件服务 → 不带图')
+  assert.equal(await make({ attachments: { admitPromptContent: async () => { throw new Error('nope') } } }).toolImage(buf), null, '登记失败 → 不带图')
+  assert.equal(await make(null).toolImage(buf), null, '没有 dsh → 不带图')
+})
+
+test('shrinkImage：没有 ffmpeg 时安静返回 null', async () => {
+  const buf = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+  assert.equal(await shrinkImage(buf, 512, 'definitely-not-a-real-ffmpeg', { timeoutMs: 800 }), null)
 })
 
 test('defineTool：自定义 render 生效，默认 render 不变', () => {
