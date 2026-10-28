@@ -41,7 +41,9 @@ function decodeFrames(buf) {
   return { frames: out, rest: buf.subarray(i) }
 }
 
-export async function startMockOneBot({ selfId = '20000002', token = 'mock-token-abcdef' } = {}) {
+export async function startMockOneBot({ selfId = '20000002', token = 'mock-token-abcdef', loginDelayMs = 0 } = {}) {
+  // loginDelayMs：让 get_login_info 慢一点回，用来测「核对期间的消息不该丢」
+  const waitLogin = async (action) => { if (action === 'get_login_info' && loginDelayMs) await new Promise((r) => setTimeout(r, loginDelayMs)) }
   const calls = []
   const sockets = new Set()
   let msgSeq = 1000
@@ -50,7 +52,6 @@ export async function startMockOneBot({ selfId = '20000002', token = 'mock-token
   const state = { failRecord: false, roles: {}, favorites: [] } // favorites：机器人号 QQ 收藏表情的地址 // roles: 群号 → 机器人在群里的身份（默认群主）
 
   function handle(action, params) {
-    calls.push({ action, params, t: Date.now() })
     switch (action) {
       case 'get_login_info': return { user_id: Number(selfId), nickname: '大肥鱼' }
       case 'send_private_msg':
@@ -96,9 +97,12 @@ export async function startMockOneBot({ selfId = '20000002', token = 'mock-token
       return res.end(JSON.stringify({ status: 'failed', retcode: 1403 }))
     }
     const action = req.url.replace(/^\/+/, '').split('?')[0]
+    const params = JSON.parse(body || '{}')
     res.setHeader('content-type', 'application/json')
     try {
-      const data = handle(action, JSON.parse(body || '{}'))
+      calls.push({ action, params, t: Date.now() }) // 记「收到请求」的时间，不是延迟之后
+      await waitLogin(action)
+      const data = handle(action, params)
       res.end(JSON.stringify({ status: 'ok', retcode: 0, data }))
     } catch (error) {
       res.end(JSON.stringify({ status: 'failed', retcode: 100, message: error.message }))
@@ -115,7 +119,7 @@ export async function startMockOneBot({ selfId = '20000002', token = 'mock-token
       `Sec-WebSocket-Accept: ${wsAccept(req.headers['sec-websocket-key'])}\r\n\r\n`)
     sockets.add(socket)
     let pending = Buffer.alloc(0)
-    socket.on('data', (d) => {
+    socket.on('data', async (d) => {
       pending = Buffer.concat([pending, d])
       const { frames, rest } = decodeFrames(pending)
       pending = rest
@@ -123,6 +127,8 @@ export async function startMockOneBot({ selfId = '20000002', token = 'mock-token
         if (f.op === 8) { socket.end(); return }
         if (f.op !== 1) continue
         const m = JSON.parse(f.data.toString('utf8'))
+        calls.push({ action: m.action, params: m.params || {}, t: Date.now() })
+        await waitLogin(m.action)
         const data = handle(m.action, m.params || {})
         socket.write(encodeFrame(JSON.stringify({ status: 'ok', retcode: 0, data, echo: m.echo })))
       }

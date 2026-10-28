@@ -315,7 +315,7 @@ return function Panel({ settings, save, toast }) {
 | `qzone-social` | 空间互动 | `run({ force })` `state()` |
 | `speakup` | 主动搭话 | `fire(原因)` `state()` |
 | `bili` | B 站 | `watch(链接)` `comment(链接, 文字)` `run()` `checkReplies()` `account()` `state()` |
-| `douyin` | 刷抖音 | `watch` `likeVideo` `commentVideo` `followUser` `dmTo` `shareToOwner` `run` `checkOwnerDms` `checkCommentReplies` `confirmOwner` `account` `state`；工具 `douyin_watch` / `douyin_like` / `douyin_comment` / `douyin_follow` / `douyin_dm` / `douyin_share`（关注仅工具，刷流不自动关注） |
+| `douyin` | 刷抖音 | `run` `browse` `watch` `likeVideo` `commentVideo` `confirmOwner` `account` `loginStep` `showWindow` `state`；工具 `douyin_watch` / `douyin_browse` / `douyin_like` / `douyin_comment` |
 | `song` | 翻唱 | `request({ song, pitch, chatId })` `search(关键词)` `status()` `install()` |
 
 聊天中枢需要的时候会去找 `stickers`（发表情、偷表情）、`voice`（发语音）、`mood`（心情影响表情 / 语音频率）、`memory`（群聊插话判断）。

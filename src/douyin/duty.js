@@ -1,443 +1,352 @@
-// 刷抖音：CDP（Edge）管内容——刷流 / 点赞 / 评论 / 回评论 / 关注 / 改资料；
-// 社交（私信、分享主人、回主人私信）走 douyin-im，无浏览器。测时注入 createFakeDriver / createFakeImClient。
+// 刷抖音：定时打开推荐，一个个点开看（真的播放、停留），读标题、分类、抖音给的内容摘要和热评，
+// 再按她的人格决定点不点赞、评不评论、要不要分享给主人（抖音私信 / QQ）、记住什么。别人发来抖音链接，她也能点开看完再聊。
+// 点赞 / 评论都按视频 id 在弹层播放器里点，点完等抖音的接口回应才算成功；遇到验证码当天就停手。
 
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { isSilence } from '../chat/reply.js'
-import {
-  dayKey, between, pickJson, parseUserInput, findAwemeId, videoLink,
-  ownerConfirmed, isOwnerSec, digestOf, cleanText, looksLikeVerify,
-  filterNickname, filterSignature, sniffImageType, AVATAR_MAX_BYTES,
-  normalizeOwnerUid,
-} from './util.js'
-import { readFileSync, existsSync } from 'node:fs'
-import { basename } from 'node:path'
-import { createBrowserDriver } from './cdp.js'
-import { IM_NOT_LOGGED_IN, openImClient } from './im.js'
+import { permOf } from '../chat/access.js'
+import { createBrowser } from './browser.js'
+import { createSite, findAwemeId, resolveShort, digestOf, videoLink } from './site.js'
 
-const WRITE_OPS = ['like', 'comment', 'replyComment', 'follow', 'dm', 'shareOwner', 'dmReply', 'sign', 'nickname', 'avatar']
-const emptyDay = () => ({
-  day: '', runs: 0, watched: 0, writes: 0,
-  like: 0, comment: 0, replyComment: 0, follow: 0, dm: 0, shareOwner: 0, dmReply: 0,
-  sign: 0, nickname: 0, avatar: 0,
-  lastSignText: '', lastNicknameText: '',
-  lastWriteAt: 0,
-  failStreak: Object.fromEntries(WRITE_OPS.map((k) => [k, 0])),
-  disabledOps: Object.fromEntries(WRITE_OPS.map((k) => [k, false])),
-  dmTargets: {}, // secUid → 今天已私信次数（任何人：每目标最多 1）
-  ownerDmStreak: 0, // 连续回主人私信条数（主人没新话就停在 3）
-  pauseNotified: false,
-})
+const dayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+const between = (lo, hi) => Math.floor(lo + Math.random() * (Math.max(lo, hi) - lo + 1))
+const clip = (t, max) => [...String(t ?? '').replace(/\s+/g, ' ').trim()].slice(0, max).join('')
+// 这些错误说明今天别再动手了：验证码、操作太频繁、账号被限制
+const STOP_RE = /验证|频繁|稍后再试|异常|限制|风控/
+const NAME = { like: '点赞', comment: '评论' }
 
+/** 从模型输出里取 JSON（对象或数组），取不到返回 fallback。 */
+export function pickJson(out, fallback) {
+  const s = String(out || '')
+  const m = s.match(/\[[\s\S]*\]/) || s.match(/\{[\s\S]*\}/)
+  if (!m) return fallback
+  try { return JSON.parse(m[0]) } catch (error) { return fallback }
+}
+
+const emptyDay = () => ({ day: '', runs: 0, watched: 0, like: 0, comment: 0, share: 0, atOwner: 0, writes: 0 })
 const emptyState = () => ({
   ...emptyDay(),
-  lastRun: 0, nextDueAt: 0, lastSkipReason: '',
-  lastReplyCheck: 0, lastDmCheck: 0,
-  seen: [], history: [], repliedComments: [], repliedDms: [],
-  pauseDay: '', pauseReason: '',
-  selfSecUid: '', selfNickname: '',
-  loginAt: 0, // 首次确认登录的时间戳；前 newAccountDays 天上限减半
+  lastRun: 0, nextDueAt: 0, lastSkipReason: '', lastWriteAt: 0, refreshIndex: 1,
+  pauseDay: '', pauseReason: '', notifiedDay: '',
+  loginAt: 0, account: null, // 上次查到的登录状态（面板只读这个，不为了显示状态去开浏览器）
+  seen: [], history: [],
+  sharedDy: [], // 在抖音里分享给主人过的视频 id：同一个视频绝不分享第二次（页面上的「已分享」状态刷新就没了，靠不住）
+  dmSeen: [], dmInit: false, lastDmCheck: 0, // 主人抖音私信：看过的消息 id；第一次看时旧消息只记下不回
 })
 
-export function createDouyin({ getConfig, hub, memory, log, driver: injected, im: injectedIm, dataFile, now: nowFn } = {}) {
-  const now = () => (nowFn ? nowFn() : Date.now())
+export function createDouyin({ getConfig, setOwner, hub, memory, log, site: injected, now = Date.now, wait } = {}) {
   const cfg = () => getConfig().douyin
-  const file = () => dataFile || dataDir('douyin.json')
-  const load = () => readJson(file(), emptyState)
-  const save = (s) => writeJson(file(), s)
-  const today = (s) => {
-    if (s.day !== dayKey(new Date(now()))) {
-      Object.assign(s, emptyDay(), { day: dayKey(new Date(now())) })
-    }
-    if (!s.failStreak) s.failStreak = Object.fromEntries(WRITE_OPS.map((k) => [k, 0]))
-    if (!s.disabledOps) s.disabledOps = Object.fromEntries(WRITE_OPS.map((k) => [k, false]))
-    if (!s.dmTargets) s.dmTargets = {}
+  const sleep = wait || ((ms) => new Promise((r) => setTimeout(r, ms)))
+  const site = injected || createSite({ browser: createBrowser({ profileDir: dataDir('douyin', 'edge-profile'), browserPath: () => cfg().browserPath, log }), log })
+  const file = () => dataDir('douyin.json')
+  const load = () => {
+    const raw = readJson(file(), emptyState)
+    const s = { ...emptyState(), ...(raw && raw.version === 2 ? raw : {}), version: 2 } // 旧版的记录格式对不上，直接从头记
+    if (s.day !== dayKey(new Date(now()))) Object.assign(s, emptyDay(), { day: dayKey(new Date(now())) })
     return s
   }
-  let busy = false
-  let socialBusy = false
-  let driver = injected || null
-  let im = injectedIm || null
-
-  const ownerName = () => getConfig().ownerName || '主人'
-  const profileDir = () => dataDir('douyin', 'edge-profile')
-  const isFake = () => Boolean(driver && driver._state)
-
-  function ensureDriver() {
-    if (driver) return driver
-    const c = cfg()
-    driver = createBrowserDriver({
-      profileDir: profileDir(),
-      browserPath: c.browserPath,
-      minimize: c.minimize !== false,
-      log,
-    })
-    return driver
-  }
-
-  async function ensureIm() {
-    if (im) return im
-    im = await openImClient({ dataPath: dataDir('douyin', 'im') })
-    return im
-  }
-
-  async function requireIm() {
-    try {
-      const client = await ensureIm()
-      const online = await client.ensureOnline()
-      if (!online.ok) return { ok: false, message: online.message || IM_NOT_LOGGED_IN }
-      return { ok: true, im: client }
-    } catch (error) {
-      return { ok: false, message: String(error?.message || error) }
-    }
-  }
-
-  function ownerImTarget() {
-    const o = cfg().owner || {}
-    return { uid: o.uid || '', secUid: o.secUid || '' }
-  }
-
-  /** CDP 偶发抠不出主人数字 uid；IM 在线后用 secUid 补全并写回配置 */
-  async function ensureOwnerUid() {
-    const o = cfg().owner || {}
-    if (o.uid && /^\d{5,20}$/.test(String(o.uid))) {
-      return { ok: true, uid: String(o.uid), secUid: o.secUid || '' }
-    }
-    if (!o.secUid) return { ok: false, message: '主人号还没核对 sec_uid' }
-    const need = await requireIm()
-    if (!need.ok) return need
-    if (typeof need.im.resolveTarget !== 'function') {
-      return { ok: false, message: '当前 IM 客户端不支持用 sec_uid 换 uid' }
-    }
-    const peer = await need.im.resolveTarget({ uid: o.uid || '', secUid: o.secUid })
-    if (!peer?.ok || !peer.uid) {
-      return { ok: false, message: peer?.message || 'sec_uid 换 uid 失败' }
-    }
-    const st = need.im.status?.() || {}
-    if (st.uid && String(st.uid) === String(peer.uid)) {
-      return { ok: false, message: '换到的 uid 和当前 IM 登录号相同——主人号应是大号，IM 请扫小号' }
-    }
-    getConfig._setOwner?.({ ...o, uid: String(peer.uid) })
-    return { ok: true, uid: String(peer.uid), secUid: o.secUid }
-  }
-
-  function socialInterruptOn() {
-    return cfg().socialInterruptBrowse !== false // 默认开
-  }
-
-  async function withSocialBusy(fn) {
-    socialBusy = true
-    try { return await fn() }
-    finally { socialBusy = false }
-  }
-
-  function browseInterrupted(s) {
-    if (!socialInterruptOn() || !socialBusy) return false
-    s.lastSkipReason = '社交优先：私信/分享打断了刷流'
-    return true
-  }
-
+  const save = (s) => writeJson(file(), s)
   const record = (s, item) => { s.history.unshift({ at: now(), ...item }); s.history = s.history.slice(0, 40) }
-  const perm = (key) => {
-    const p = getConfig().profilePerms?.[key]
-    return p === 'off' ? 'off' : (p || 'owner')
+  const owner = () => getConfig().ownerName || '主人'
+  // 主人的抖音号核对过、面板里的输入也没改过，才能真·@
+  const ownerDy = () => {
+    const o = cfg().owner || {}
+    return o.secUid && o.input && o.confirmedInput === o.input ? o : null
   }
   const paused = (s) => s.pauseDay === dayKey(new Date(now()))
-  const isNewAccount = (s) => {
-    const days = Number(cfg().gate?.newAccountDays ?? 3)
-    if (!s.loginAt || days <= 0) return false
-    return now() - s.loginAt < days * 86400_000
-  }
-  const capOf = (s, key) => {
-    let cap = Number(cfg().caps?.[key] ?? 0)
-    if (isNewAccount(s)) cap = Math.floor(cap / 2)
-    return cap
-  }
-  const left = (s, key) => Math.max(0, capOf(s, key) - (s[key] || 0))
-  const writeBudget = (s) => {
-    let max = Number(cfg().gate?.maxWritesPerDay ?? 60)
-    if (isNewAccount(s)) max = Math.floor(max / 2)
-    return Math.max(0, max - (s.writes || 0))
-  }
-  const dry = () => Boolean(getConfig().dryRun)
+  let busy = false
 
-  /** 验证码 / 风控：停全部写操作，只通知主人一次。 */
+  // 刚登录的号前几天上限减半：新号一上来就猛点赞猛评论最容易被风控
+  const isNew = (s) => {
+    const days = cfg().gate.newAccountDays
+    return Boolean(days && s.loginAt && now() - s.loginAt < days * 86400_000)
+  }
+  const capOf = (s, kind) => (isNew(s) ? Math.floor(cfg().caps[kind] / 2) : cfg().caps[kind])
+  const left = (s, kind) => Math.max(0, capOf(s, kind) - (s[kind] || 0))
+  const writesLeft = (s) => Math.max(0, (isNew(s) ? Math.floor(cfg().gate.maxWritesPerDay / 2) : cfg().gate.maxWritesPerDay) - s.writes)
+
+  /** 今天不再在抖音上动手（看还能看）；当天第一次停时在 QQ 上跟主人说一声。 */
   function pauseAll(s, why) {
     s.pauseDay = dayKey(new Date(now()))
-    s.pauseReason = why || '风控'
-    log.warn(`今天先不在抖音动手了：${s.pauseReason}`)
-    if (!s.pauseNotified && getConfig().ownerQQ) {
-      s.pauseNotified = true
-      hub.sendText?.(`private:${getConfig().ownerQQ}`, `抖音这边要验证 / 被限制了，今天所有动手的操作都停了：${s.pauseReason}`).catch?.(() => {})
+    s.pauseReason = clip(why, 60) || '被风控了'
+    log.warn(`今天先不在抖音上点赞评论了：${s.pauseReason}`)
+    const qq = getConfig().ownerQQ
+    if (qq && s.notifiedDay !== s.pauseDay) {
+      s.notifiedDay = s.pauseDay
+      Promise.resolve(hub.sendText?.(`private:${qq}`, `抖音那边要验证 / 被限制了，今天我先不点赞评论了：${s.pauseReason}。要验证的话在面板「抖音」页点「显示浏览器窗口」处理一下。`)).catch(() => {})
     }
-    save(s)
   }
 
-  /** 写操作总闸：日总上限、间隔、单项上限、连续失败禁用、验证码、试运行不计次。 */
-  async function doWrite(s, kind, act, meta = {}) {
-    if (paused(s)) return { ok: false, message: '今天暂停：' + s.pauseReason }
-    if (s.disabledOps?.[kind]) return { ok: false, message: `${kind} 今天连续失败太多次，先停了` }
-    if (left(s, kind) <= 0) return { ok: false, message: `今天 ${kind} 次数用完了` }
-    if (writeBudget(s) <= 0) return { ok: false, message: '今天写操作总次数用完了' }
-    const gapSec = Number(cfg().gate?.minWriteGapSec ?? 20)
-    const since = now() - (s.lastWriteAt || 0)
-    if (gapSec > 0 && s.lastWriteAt && since < gapSec * 1000) {
-      return { ok: false, message: `写太勤了，再等 ${Math.ceil((gapSec * 1000 - since) / 1000)} 秒` }
+  /** 写操作闸门：暂停、单项上限、总上限、间隔。能做返回 ''，不能做返回原因。 */
+  function blocked(s, kind) {
+    if (paused(s)) return '今天暂停了：' + s.pauseReason
+    if (left(s, kind) <= 0) return `今天${NAME[kind]}次数用完了`
+    if (writesLeft(s) <= 0) return '今天在抖音上动手的次数用完了'
+    const gap = cfg().gate.minWriteGapSec * 1000 - (now() - (s.lastWriteAt || 0))
+    if (gap > 0) return `动作太密了，再等 ${Math.ceil(gap / 1000)} 秒`
+    return ''
+  }
+
+  /** 做一次写操作（点赞 / 评论）。试运行只记日志不占次数；出错是验证码 / 风控就停一天。刷流里间隔不够就等够再做。 */
+  async function doWrite(s, kind, meta, act, { waitGap = false } = {}) {
+    if (waitGap) {
+      const gap = cfg().gate.minWriteGapSec * 1000 - (now() - (s.lastWriteAt || 0))
+      if (gap > 0) await sleep(gap + between(500, 3000))
     }
-    // 试运行：只记日志，不占真实日上限 / 总闸 / 间隔
-    if (dry()) {
-      log.info(`试运行：本来要 ${kind}`, meta.awemeId || meta.secUid || meta.text || '')
-      record(s, { kind: 'dry:' + kind, awemeId: meta.awemeId, author: meta.author, text: meta.text || '', secUid: meta.secUid })
-      save(s)
+    const why = blocked(s, kind)
+    if (why) return { ok: false, message: why }
+    if (getConfig().dryRun) {
+      log.info(`试运行：本来要在抖音${NAME[kind]}`, meta.title || meta.awemeId, meta.text || '')
+      record(s, { kind: 'dry:' + kind, ...meta })
       return { ok: true, dryRun: true }
     }
     try {
-      await act()
+      const r = await act()
+      s.lastWriteAt = now()
+      if (!r?.already) { s[kind]++; s.writes++ }
+      record(s, { kind, ...meta, ...(r?.atOwner ? { atOwner: true } : {}) })
+      return { ok: true, already: Boolean(r?.already), atOwner: Boolean(r?.atOwner) }
     } catch (error) {
-      const msg = String(error?.message || error)
-      log.warn(`抖音${kind}失败：`, msg)
-      record(s, { kind: 'error', awemeId: meta.awemeId, text: `${kind}没成功：${msg}` })
-      const drv = ensureDriver()
-      if (drv.paused || looksLikeVerify(msg) || /验证|风控|频繁|异常/.test(msg)) {
-        pauseAll(s, drv.pauseReason || msg.slice(0, 40))
-      } else {
-        s.failStreak[kind] = (s.failStreak[kind] || 0) + 1
-        if (s.failStreak[kind] >= 3) {
-          s.disabledOps[kind] = true
-          log.warn(`${kind} 连续失败 3 次，今天先禁用`)
-        }
-        save(s)
-      }
-      return { ok: false, message: msg }
+      log.warn(`抖音${NAME[kind]}失败：`, error.message)
+      record(s, { kind: 'error', ...meta, text: `${NAME[kind]}没成功：${error.message}` })
+      if (error.code === 'verify' || error.code === 'login' || STOP_RE.test(error.message)) pauseAll(s, error.message)
+      return { ok: false, message: error.message }
     }
-    s[kind] = (s[kind] || 0) + 1
-    s.writes = (s.writes || 0) + 1
-    s.lastWriteAt = now()
-    s.failStreak[kind] = 0
-    record(s, { kind, awemeId: meta.awemeId, author: meta.author, text: meta.text || '', secUid: meta.secUid })
-    save(s)
+  }
+
+  /** 打开浏览器、确认登录了、页面上没验证码。 */
+  async function ready(s) {
+    const r = await site.ensure()
+    if (!r.ok) return r
+    const me = await site.self().catch((error) => ({ error: error.message }))
+    s.account = { at: now(), loggedIn: Boolean(me?.secUid), nickname: me?.nickname || '', secUid: me?.secUid || '', error: me?.error || '' }
+    if (me?.error) return { ok: false, message: '查不了抖音登录状态：' + me.error }
+    if (!me) return { ok: false, message: '抖音还没登录，先在面板「抖音」页扫码登录' }
+    if (!s.loginAt) s.loginAt = now()
+    const why = await site.verify()
+    if (why) {
+      pauseAll(s, why)
+      return { ok: false, message: '抖音要验证：' + why }
+    }
     return { ok: true }
   }
 
-  function turnText(out) {
-    if (out == null) return ''
-    if (typeof out === 'string') return out
-    if (typeof out?.text === 'string') return out.text
-    return String(out)
-  }
-
-  /** 刷流 think：可调 shareBias（stingy|normal|proactive）。 */
-  function shareBiasHint() {
-    const bias = String(cfg().shareBias || 'proactive').toLowerCase()
-    if (bias === 'stingy' || bias === 'off') return '觉得主人一定会喜欢再写 share，拿不准就空着。'
-    if (bias === 'normal') return '觉得主人会喜欢才写 share，不然空。'
-    return '分享要积极：好看、有趣、值得主人一看的就填 share，别空着；今天额度没用完就尽量推。'
+  function shareHint() {
+    const b = cfg().shareBias
+    if (b === 'stingy') return `觉得${owner()}一定会喜欢才写 share，拿不准就空着。`
+    if (b === 'normal') return `觉得${owner()}会喜欢才写 share，不然空字符串。`
+    return `好看、有趣、值得${owner()}一看的就写 share，别太吝啬。`
   }
 
   async function think(prompt) {
-    return turnText(await hub.runSystemTurn('douyin', 'QQ · 刷抖音', `【刷抖音，不是聊天，这一轮不会发到聊天里】\n${prompt}`, { timeoutMs: 180000 }))
+    const out = await hub.runSystemTurn('douyin', 'QQ · 刷抖音', `【刷抖音，不是聊天，这一轮不会发到聊天里】\n${prompt}`, { timeoutMs: 180000 })
+    return typeof out === 'string' ? out : String(out?.text ?? out ?? '')
   }
 
-  /** 抖音 IM 私信：同 QQ 走 hub.runSystemTurn，但关工具；正文经 IM 发出。 */
-  async function thinkImReply(prompt) {
-    return turnText(await hub.runSystemTurn(
-      'douyin-im',
-      '抖音 · 私信',
-      `【抖音私信，用你的口气回；这一轮没有工具，回复会经抖音 IM 发给对方】\n${prompt}`,
-      { timeoutMs: 180000, noTools: true },
-    ))
+  /** 真·@主人用的信息：按 sec_uid 现查一次昵称（主人改了名也认得出）；查不到就用核对时记下的。 */
+  async function ownerMention() {
+    const o = ownerDy()
+    if (!o) return null
+    const u = await site.user(o.secUid).catch(() => null)
+    return { secUid: o.secUid, uid: u?.uid || o.uid, nickname: u?.nickname || o.nickname }
   }
 
-  async function boot() {
-    const d = ensureDriver()
-    const r = await d.launch()
-    if (!r.ok) return r
-    const gate = await d.checkGate()
-    if (!gate.ok) {
-      if (gate.verify) {
-        const s = today(load())
-        pauseAll(s, gate.reason || '要验证')
+  /**
+   * 把视频分享给主人：按面板设置在抖音里私信分享（视频卡片）、在 QQ 私聊发（她的话 + 链接），或两边都发。
+   * 抖音那边没核对主人 / 发不出去时改发 QQ，免得白看。返回 { ok, via: ['douyin', 'qq'] }。
+   */
+  async function shareToOwner(s, v, text) {
+    const g = getConfig()
+    const mode = cfg().shareTo
+    const via = []
+    const dy = ownerDy()
+    if ((mode === 'douyin' || mode === 'both') && dy && s.sharedDy.includes(v.awemeId)) {
+      via.push('douyin') // 之前就在抖音里分享过了
+    } else if ((mode === 'douyin' || mode === 'both') && dy) {
+      if (g.dryRun) {
+        log.info(`试运行：本来要在抖音里把《${v.title}》分享给${owner()}`)
+        via.push('douyin')
+      } else {
+        const gap = cfg().gate.minWriteGapSec * 1000 - (now() - (s.lastWriteAt || 0))
+        if (gap > 0) await sleep(gap + between(500, 3000))
+        try {
+          const who = await ownerMention()
+          await site.share(v.awemeId, { secUid: who.secUid, nickname: who.nickname })
+          s.lastWriteAt = now()
+          s.sharedDy = [...s.sharedDy, v.awemeId].slice(-300)
+          via.push('douyin')
+        } catch (error) {
+          log.warn('抖音里分享给主人失败：', error.message)
+          record(s, { kind: 'error', awemeId: v.awemeId, title: v.title, author: v.author, text: `抖音里分享没成功：${error.message}${g.ownerQQ ? '，改发 QQ' : ''}` })
+          if (error.code === 'verify' || STOP_RE.test(error.message)) pauseAll(s, error.message)
+        }
       }
-      return gate
     }
-    return { ok: true }
-  }
-
-  async function account(force = false) {
-    try {
-      const d = ensureDriver()
-      if (force || !d._state) await d.launch()
-      const self = await d.selfInfo()
-      const gate = await d.checkGate()
-      const isLogin = !gate.needLogin && !gate.verify
-      if (isLogin) {
-        const s = today(load())
-        if (!s.loginAt) { s.loginAt = now(); save(s) }
-        if (self?.secUid) { s.selfSecUid = self.secUid; s.selfNickname = self.nickname || ''; save(s) }
+    if (g.ownerQQ && (mode === 'qq' || mode === 'both' || !via.length)) {
+      try {
+        await hub.sendText(`private:${g.ownerQQ}`, `${text}\n${videoLink(v.awemeId)}`)
+        via.push('qq')
+      } catch (error) {
+        log.warn('QQ 上分享抖音视频失败：', error.message)
       }
-      return {
-        isLogin,
-        needLogin: !!gate.needLogin,
-        verify: !!gate.verify,
-        reason: gate.reason || '',
-        secUid: self?.secUid || '',
-        nickname: self?.nickname || '',
-      }
-    } catch (error) {
-      return { isLogin: false, error: error.message }
     }
+    if (via.length) memory?.addEvent?.({ text: `把抖音上《${v.title}》分享给了${owner()}${via.includes('douyin') ? '（抖音私信）' : ''}：${text.slice(0, 40)}`, tags: ['抖音'], importance: 0.45 })
+    return { ok: via.length > 0, via }
   }
 
+  /** 核对主人的抖音号：填抖音号或主页链接，查到这个人后把 sec_uid 等记进配置。 */
   async function confirmOwner(input) {
-    const raw = String(input ?? cfg().owner?.input ?? '').trim()
-    const parsed = parseUserInput(raw)
-    if (!parsed) return { ok: false, message: '请填抖音号，或主页链接（douyin.com/user/…）' }
-    const d = ensureDriver()
-    const launched = await d.launch()
-    if (!launched.ok) return launched
-    const r = await d.resolveUser(parsed)
-    if (!r.ok) return r
-    const uid = normalizeOwnerUid(r.uid)
-    getConfig._setOwner?.({ input: raw, secUid: r.secUid, uid, nickname: r.nickname || '', avatar: r.avatar || '', confirmedInput: raw })
-    return { ok: true, message: `已核对：${r.nickname || r.secUid}`, secUid: r.secUid, uid, nickname: r.nickname, avatar: r.avatar }
-  }
-
-  async function dwellMs() {
-    const c = cfg()
-    return between(c.dwellMin, c.dwellMax) * 1000
-  }
-
-  /** 刷流里对一条视频做点赞 / 评论 / 分享（关注不在刷流里，只走 douyin_follow 工具）。 */
-  async function watchOne(s, v, decisions) {
-    const d = decisions || {}
-    const feeling = cleanText(d.feeling, 60)
-    memory?.addEvent?.({ text: `在抖音看了 ${v.author || '有人'} 的视频${feeling ? '：' + feeling : ''}`, tags: ['抖音'], importance: 0.4 })
-    if (d.remember && !isSilence(d.remember)) memory?.add?.({ text: String(d.remember).slice(0, 200), tags: ['抖音'], importance: 0.5, source: 'event' })
-    record(s, { kind: 'watch', awemeId: v.awemeId, author: v.author, text: feeling || v.desc?.slice(0, 40) || '' })
-    s.watched = (s.watched || 0) + 1
-    save(s)
-
-    const drv = ensureDriver()
-    if (paused(s)) return
-
-    if (d.like && perm('douyinLike') !== 'off') {
-      const r = await doWrite(s, 'like', async () => {
-        const ok = await drv.clickLike()
-        if (!ok) throw new Error('找不到点赞按钮')
-      }, { awemeId: v.awemeId, author: v.author })
-      if (!r.ok && paused(s)) return
-    }
-    if (cleanText(d.comment) && perm('douyinComment') !== 'off' && !paused(s)) {
-      const text = cleanText(d.comment, 100)
-      const r = await doWrite(s, 'comment', async () => {
-        await drv.openComments()
-        const ok = await drv.typeAndSend(text)
-        if (!ok) throw new Error('评论框打不开')
-      }, { awemeId: v.awemeId, author: v.author, text })
-      if (r.ok && !r.dryRun) memory?.addEvent?.({ text: `在抖音评论：${text.slice(0, 60)}`, tags: ['抖音'], importance: 0.4 })
-      if (!r.ok && paused(s)) return
-    }
-    if (cleanText(d.share) && perm('douyinShareOwner') !== 'off' && ownerConfirmed(getConfig()) && !paused(s)) {
-      const text = cleanText(d.share, 80)
-      const ensured = await ensureOwnerUid()
-      if (!ensured.ok) {
-        record(s, { kind: 'shareOwner', ok: false, text: ensured.message })
-        return
-      }
-      const target = { uid: ensured.uid, secUid: ensured.secUid || ownerImTarget().secUid }
-      const r = await doWrite(s, 'shareOwner', async () => {
-        const need = await requireIm()
-        if (!need.ok) throw new Error(need.message)
-        await need.im.shareWork(target, {
-          itemId: v.awemeId, title: v.desc, author: v.author, authorSecUid: v.authorSecUid,
-        }, text)
-      }, { awemeId: v.awemeId, text, secUid: target.secUid })
-      if (r.ok && !r.dryRun) memory?.addEvent?.({ text: `把抖音视频私信分享给${ownerName()}：${text.slice(0, 40)}`, tags: ['抖音'], importance: 0.45 })
+    const raw = String(input || '').trim()
+    const sec = raw.match(/douyin\.com\/user\/(MS4w[\w-]+)/)?.[1] || (/^MS4w[\w-]+$/.test(raw) ? raw : '')
+    const douyinId = sec ? '' : raw.replace(/^@/, '').replace(/^抖音号[:：]?\s*/, '')
+    if (!sec && !/^[\w.]{2,30}$/.test(douyinId)) return { ok: false, message: '填你的抖音号，或者主页链接（douyin.com/user/…）' }
+    const s = load()
+    try {
+      const r = await ready(s)
+      if (!r.ok) return r
+      const u = sec ? await site.user(sec) : await site.findByDouyinId(douyinId)
+      setOwner?.({ input: raw, secUid: u.secUid, uid: u.uid, nickname: u.nickname, confirmedInput: raw })
+      return { ok: true, message: `核对好了：${u.nickname}${u.douyinId ? '（抖音号 ' + u.douyinId + '）' : ''}`, owner: u }
+    } catch (error) {
+      return { ok: false, message: '没核对上：' + error.message }
+    } finally {
+      save(s)
     }
   }
 
-  async function run({ force = false } = {}) {
+  /** 从推荐里挑 want 个没看过的；一页不够就再拉一页。 */
+  async function pick(s, want) {
+    const seen = new Set(s.seen)
+    const out = []
+    for (let i = 0; i < 4 && out.length < want; i++) {
+      const page = await site.feed(s.refreshIndex)
+      s.refreshIndex = (s.refreshIndex % 50) + 1
+      for (const v of page) if (!seen.has(v.awemeId) && !out.some((x) => x.awemeId === v.awemeId) && out.length < want) out.push(v)
+    }
+    return out
+  }
+
+  /**
+   * 刷一轮。force = 面板里手动点的 / 主人让她去刷的（不占每天的轮数）。
+   * ownerAsked = 主人开口要她找视频：这轮至少分享一个给主人，她挑剔到一个都不分享时自动挑一个。
+   */
+  async function run({ force = false, ownerAsked = false } = {}) {
     const c = cfg()
     if (busy) return { ok: false, message: '正在刷' }
-    if (!c.enabled && !force) return { ok: false, message: '抖音没打开' }
-    if (perm('douyinBrowse') === 'off' && !force) return { ok: false, message: '刷抖音在权限里关掉了' }
+    if (!c.enabled) return { ok: false, message: '抖音没打开' }
     busy = true
-    const s = today(load())
+    const s = load()
     try {
-      if (paused(s)) return { ok: false, message: '今天暂停：' + s.pauseReason }
-      if ((s.watched || 0) >= c.maxWatchPerDay) return { ok: false, message: `今天已经看了 ${s.watched} 个（上限 ${c.maxWatchPerDay}）` }
+      // 主人亲口让她去找视频：不受「每天看多少个」的限制（点赞评论分享那些写操作的上限照旧）
+      const want = ownerAsked ? Math.max(Math.min(c.perRun, c.maxWatchPerDay - s.watched), Math.min(c.perRun, 3)) : Math.min(c.perRun, c.maxWatchPerDay - s.watched)
+      if (want <= 0) return { ok: false, message: `今天已经看了 ${s.watched} 个（上限 ${c.maxWatchPerDay}）` }
+      const r = await ready(s)
+      if (!r.ok) { s.lastSkipReason = r.message; return r }
+      const list = await pick(s, want)
+      if (!list.length) { s.lastSkipReason = '这次推荐里没刷到新视频'; return { ok: false, message: s.lastSkipReason } }
 
-      const booted = await boot()
-      if (!booted.ok) {
-        s.lastSkipReason = booted.reason || booted.message || '启动失败'
-        return { ok: false, message: s.lastSkipReason }
-      }
-      const drv = ensureDriver()
-      const rec = await drv.ensureRecommend()
-      if (!rec.ok) {
-        s.lastSkipReason = rec.message || '不在推荐页'
-        return { ok: false, message: s.lastSkipReason }
-      }
-
-      const seen = new Set(s.seen || [])
-      const want = Math.min(c.perRun, Math.max(0, c.maxWatchPerDay - (s.watched || 0)))
-      const list = await drv.nextAwemes({ seen, want })
-      if (!list.length) {
-        s.lastSkipReason = '这次没刷到新视频'
-        return { ok: false, message: s.lastSkipReason }
-      }
-
+      // 一个个点开看：真的播放、停一会儿，同时拿热评
       const looked = []
       for (const v of list) {
-        if (browseInterrupted(s)) {
-          save(s)
-          return { ok: false, message: s.lastSkipReason, interrupted: true }
+        try {
+          const comments = await site.comments(v.awemeId).catch(() => [])
+          await site.watch(v.awemeId, between(c.dwellMin, c.dwellMax) * 1000)
+          looked.push({ v, comments })
+          s.watched++
+          s.seen = [...s.seen.filter((x) => x !== v.awemeId), v.awemeId].slice(-500)
+        } catch (error) {
+          log.debug(`看 ${v.awemeId} 失败：`, error.message)
+          if (error.code === 'verify') { pauseAll(s, error.message); break }
         }
-        // 真机按面板停留；假驱动跳过以免拖慢测试
-        const waitMs = await dwellMs()
-        if (!isFake()) await new Promise((r) => setTimeout(r, waitMs))
-        const active = await drv.activeAwemeId().catch(() => '')
-        if (active && active !== v.awemeId && list.every((x) => x.awemeId !== active)) {
-          log.debug(`当前播的是 ${active}，和预期 ${v.awemeId} 不一致，跳过`)
-          continue
-        }
-        seen.add(v.awemeId)
-        looked.push(v)
-        s.seen = [...seen].slice(-500)
         save(s)
       }
-      if (!looked.length) return { ok: false, message: '视频对不上，这轮没看' }
+      if (!looked.length) { s.lastSkipReason = '视频都没打开'; return { ok: false, message: s.lastSkipReason } }
 
-      const likeLeft = left(s, 'like')
-      const commentLeft = left(s, 'comment')
-      const shareLeft = ownerConfirmed(getConfig()) ? left(s, 'shareOwner') : 0
-      const out = await think(
-        `你在抖音刷到了这几个视频：\n\n${looked.map((v, i) => `【${i + 1}】${digestOf(v)}`).join('\n\n')}\n\n` +
-        `看完说说你的想法。对每个视频给一个对象：{"i":序号,"feeling":"一句真实感受","like":true/false,"comment":"想发的评论（不想就空字符串）","share":"想私信分享给${ownerName()}的话","remember":"值得记住的（没有就空）"}。` +
-        `（关注不在刷流里做，有人让你关注再用工具。）这次最多点赞 ${likeLeft}、评论 ${commentLeft}、分享 ${shareLeft}。${shareBiasHint()}只输出 JSON 数组。`)
+      const canWrite = !paused(s)
+      const g = getConfig()
+      const likeLeft = canWrite && permOf(g, 'douyinLike') !== 'off' ? Math.min(left(s, 'like'), writesLeft(s)) : 0
+      const commentLeft = canWrite && permOf(g, 'douyinComment') !== 'off' ? Math.min(left(s, 'comment'), writesLeft(s)) : 0
+      const shareLeft = (g.ownerQQ || ownerDy()) && permOf(g, 'douyinShareOwner') !== 'off' ? left(s, 'share') : 0
+      const atLeft = commentLeft && ownerDy() ? left(s, 'atOwner') : 0
+      const atRule = atLeft
+        ? ` 特别想让${owner()}看到的，把 "at" 设成 true 并写 comment：系统会在评论里真的 @${owner()}（${owner()}会收到抖音通知），comment 里别自己打 @。这次最多 @ ${atLeft} 次。`
+        : ''
+      const out = await think(`你在抖音刷到了这几个视频：\n\n${looked.map((x, i) => `【${i + 1}】${digestOf(x.v, x.comments)}`).join('\n\n')}\n\n` +
+        `看完说说你的想法。对每个视频给一个对象：{"i":序号, "feeling":"一句你的真实感受", "like":true/false, "comment":"想在视频下发的评论（像普通观众，一两句、别打广告，不想评就空字符串）", ${atLeft ? '"at":true/false, ' : ''}"share":"想分享给${owner()}时说的话（不想分享就空字符串）", "remember":"值得记住的一件事（没有就空字符串）"}。` +
+        `这次最多点赞 ${likeLeft} 个、评论 ${commentLeft} 个、分享 ${shareLeft} 个。${atRule}${shareLeft ? (ownerAsked ? `${owner()}刚才专门让你找视频给他，这轮至少挑一个最合适的写 share，别全空着。` : shareHint()) : ''}只输出 JSON 数组。`)
       const decisions = pickJson(out, [])
-      const byI = new Map((Array.isArray(decisions) ? decisions : []).map((d) => [Number(d.i) || 0, d]))
+      const byI = new Map((Array.isArray(decisions) ? decisions : []).map((d) => [Number(d?.i) || 0, d]))
 
+      let liked = 0
+      let commented = 0
+      let shared = 0
+      let atted = 0
+      const sharedList = [] // 这轮分享给主人的 { title, via }，刷完告诉她
       for (let i = 0; i < looked.length; i++) {
-        if (paused(s)) break
-        if (browseInterrupted(s)) {
-          save(s)
-          return { ok: false, message: s.lastSkipReason, interrupted: true, watched: looked.length }
+        const { v } = looked[i]
+        const d = byI.get(i + 1) || {}
+        const meta = { awemeId: v.awemeId, title: v.title, author: v.author }
+        const feeling = clip(d.feeling, 80)
+        memory?.addEvent?.({ text: `在抖音看了${v.author ? ' ' + v.author + ' 的' : ''}《${v.title}》${feeling ? '：' + feeling : ''}`, tags: ['抖音'], importance: 0.4 })
+        if (d.remember && !isSilence(d.remember)) memory?.add?.({ text: clip(d.remember, 200), tags: ['抖音'], importance: 0.5, source: 'event' })
+        record(s, { kind: 'watch', ...meta, text: feeling })
+
+        if (d.like === true && liked < likeLeft) {
+          const w = await doWrite(s, 'like', meta, () => site.like(v.awemeId), { waitGap: true })
+          if (w.ok && !w.already) liked++
         }
-        await watchOne(s, looked[i], byI.get(i + 1) || {})
+        // 模型自己打的 @xxx 是假 @（对方收不到通知），去掉；要 @ 主人走下面的真·@
+        const comment = clip(String(d.comment || '').replace(/@\S+\s*/g, ''), 100)
+        if (comment && !isSilence(comment) && commented < commentLeft) {
+          const at = d.at === true && atted < atLeft ? await ownerMention() : null
+          const w = await doWrite(s, 'comment', { ...meta, text: comment }, () => site.comment(v.awemeId, comment, at ? { at } : {}), { waitGap: true })
+          if (w.ok) {
+            commented++
+            if (w.atOwner) { atted++; s.atOwner++ }
+            if (!w.dryRun) memory?.addEvent?.({ text: `在抖音《${v.title}》下评论${w.atOwner ? `（@了${owner()}）` : ''}：${comment.slice(0, 60)}`, tags: ['抖音'], importance: 0.4 })
+          }
+        }
+        const share = clip(d.share, 120)
+        if (share && !isSilence(share) && shared < shareLeft) {
+          const r = await shareToOwner(s, v, share)
+          if (r.ok) {
+            shared++
+            s.share++
+            sharedList.push({ title: v.title, via: r.via })
+            record(s, { kind: 'share', ...meta, text: share, via: r.via })
+          }
+        }
+        save(s)
+      }
+
+      // 主人开口要了，她却一个都没分享：挑她点了赞的（没有就第一个）分享过去，免得主人白等
+      if (ownerAsked && !shared && shareLeft) {
+        const pickI = Math.max(0, looked.findIndex((x, i) => (byI.get(i + 1) || {}).like === true))
+        const { v } = looked[pickI]
+        const text = clip((byI.get(pickI + 1) || {}).feeling, 80) || `${owner()}你要的，这个还行`
+        const r = await shareToOwner(s, v, text)
+        if (r.ok) {
+          shared++
+          s.share++
+          sharedList.push({ title: v.title, via: r.via })
+          record(s, { kind: 'share', awemeId: v.awemeId, title: v.title, author: v.author, text, via: r.via })
+        }
+        save(s)
       }
 
       if (!force) {
         s.runs++
-        const jitter = 0.8 + Math.random() * 0.5
-        s.nextDueAt = now() + Math.round(c.intervalHours * 3600_000 * jitter)
+        s.nextDueAt = now() + Math.round(c.intervalHours * 3600_000 * (0.8 + Math.random() * 0.5))
       }
       s.lastRun = now()
       s.lastSkipReason = ''
-      log.info(`刷了一轮抖音：看了 ${looked.length} 个`)
-      return { ok: true, message: `看了 ${looked.length} 个视频`, watched: looked.length }
+      const msg = `看了 ${looked.length} 个视频，点赞 ${liked}，评论 ${commented}${atted ? `（@了${owner()} ${atted} 次）` : ''}，分享 ${shared} 个`
+      log.info('刷了一轮抖音：' + msg)
+      return { ok: true, message: msg, watched: looked.length, liked, commented, shared, sharedList }
     } catch (error) {
       log.warn('刷抖音出错：', error.message)
       s.lastSkipReason = error.message
+      if (error.code === 'verify') pauseAll(s, error.message)
       return { ok: false, message: error.message }
     } finally {
       save(s)
@@ -445,502 +354,265 @@ export function createDouyin({ getConfig, hub, memory, log, driver: injected, im
     }
   }
 
-  async function checkOwnerDms() {
-    if (perm('douyinReplyOwnerDm') === 'off') return { ok: false, message: '回主人私信在权限里关掉了' }
-    if (!ownerConfirmed(getConfig())) return { ok: false, message: '还没核对主人的抖音号' }
-    const s = today(load())
-    if (paused(s)) return { ok: false, message: '今天暂停：' + s.pauseReason }
-    s.lastDmCheck = now()
-    return withSocialBusy(async () => {
-      const need = await requireIm()
-      if (!need.ok) { save(s); return need }
-      let n = 0
-      try {
-        const done = new Set(s.repliedDms || [])
-        const inbox = await need.im.listInbox()
-        const owner = getConfig().douyin.owner || {}
-        const ownerSec = owner.secUid
-        if (inbox.length && !inbox.some((x) => x.secUid || x.uid)) {
-          return { ok: false, message: '私信列表认不出对方身份，回主人私信先不开' }
-        }
-        const isOwnerMsg = (x) => {
-          if (x.secUid && isOwnerSec(getConfig(), x.secUid)) return true
-          if (owner.uid && x.uid && String(x.uid) === String(owner.uid)) return true
-          return false
-        }
-        const cutoff = now() - 30 * 60_000
-        const fresh = inbox.filter((x) => {
-          if (!isOwnerMsg(x) || !x.text) return false
-          const key = `${x.secUid || x.uid}:${x.text}`
-          if (done.has(key)) return false
-          const at = Number(x.at) || now()
-          if (at < cutoff) return false
-          return true
-        }).slice(0, 5)
-        if (fresh.length) s.ownerDmStreak = 0
-
-        for (const m of fresh) {
-          if (left(s, 'dmReply') <= 0) break
-          if ((s.ownerDmStreak || 0) >= 3) break
-          done.add(`${m.secUid || m.uid}:${m.text}`)
-          hub.logChat?.('douyin', m.nickname || '主人抖音', `抖音私信你：${m.text}`, '')
-          // 不 silent log-only：走 thinkImReply → hub.runSystemTurn（无工具），再 doWrite/IM 发出
-          const out = await thinkImReply(`这是${ownerName()}在抖音给你发的私信：「${m.text}」
-用你的口气回一句（像平时私聊，别太长）；不想回就只输出 [沉默]。只输出回复正文。`)
-          const reply = cleanText(String(out || '').split(/\n+/)[0], 100)
-          if (!reply || isSilence(reply)) continue
-          const r = await doWrite(s, 'dmReply', async () => {
-            await need.im.sendText(ownerImTarget(), reply)
-          }, { text: `${m.text} → ${reply}`, secUid: ownerSec })
-          if (r.ok) {
-            n++
-            s.ownerDmStreak = (s.ownerDmStreak || 0) + 1
-            if (!r.dryRun) memory?.addEvent?.({ text: `在抖音回了${ownerName()}的私信：${reply.slice(0, 50)}`, tags: ['抖音'], importance: 0.5 })
-            save(s)
-          }
-          if (paused(s)) break
-        }
-        s.repliedDms = [...done].slice(-200)
-        return { ok: true, message: `回了 ${n} 条主人私信`, replied: n }
-      } catch (error) {
-        return { ok: false, message: error.message }
-      } finally { save(s) }
-    })
+  /** 链接 / 短链 / 视频 id → 视频 id。 */
+  async function idOf(link) {
+    const id = findAwemeId(link)
+    if (!id) return ''
+    if (id.awemeId) return id.awemeId
+    return resolveShort(id.short).catch(() => '')
   }
 
-  async function checkCommentReplies() {
-    if (perm('douyinReplyComment') === 'off') return { ok: false, message: '回评论在权限里关掉了' }
-    const s = today(load())
-    if (paused(s)) return { ok: false, message: '今天暂停：' + s.pauseReason }
-    s.lastReplyCheck = now()
-    const booted = await boot()
-    if (!booted.ok) { save(s); return { ok: false, message: booted.reason || booted.message } }
-    const drv = ensureDriver()
-    let n = 0
-    try {
-      const list = typeof drv.listCommentReplies === 'function' ? await drv.listCommentReplies() : []
-      const done = new Set(s.repliedComments || [])
-      for (const x of list || []) {
-        if (!x?.id || done.has(x.id) || left(s, 'replyComment') <= 0 || paused(s)) continue
-        done.add(x.id)
-        const out = await think(`有人在抖音回你的评论：「${x.text}」（对方：${x.name || '?'}）\n想回就用你的口气回一句，不想回就 [沉默]。只输出回复正文。`)
-        const reply = cleanText(String(out || '').split(/\n+/)[0], 100)
-        if (!reply || isSilence(reply)) continue
-        const r = await doWrite(s, 'replyComment', async () => {
-          if (x.awemeId) await drv.navigate(videoLink(x.awemeId)).catch(() => {})
-          await drv.openComments().catch(() => {})
-          const ok = await drv.typeAndSend(reply)
-          if (!ok) throw new Error('回评论没发出去')
-        }, { text: `${x.name}：${x.text} → ${reply}`, awemeId: x.awemeId })
-        if (r.ok) n++
-        if (paused(s)) break
-      }
-      s.repliedComments = [...done].slice(-300)
-      return { ok: true, message: `回了 ${n} 条评论`, replied: n }
-    } catch (error) {
-      return { ok: false, message: error.message }
-    } finally { save(s) }
-  }
-
-  async function resolveTarget(target) {
-    const parsed = parseUserInput(target) || (String(target).length > 20 ? { secUid: String(target).trim() } : null)
-    if (!parsed) return { ok: false, message: '请给对方抖音主页链接或 sec_uid' }
-    const drv = ensureDriver()
-    if (parsed.secUid) return { ok: true, secUid: parsed.secUid }
-    return drv.resolveUser(parsed)
-  }
-
-  /** 工具：主动私信（每目标每天最多 1 次）。走 IM，不经 CDP。 */
-  async function dmTo(target, text) {
-    if (perm('douyinDm') === 'off') return { ok: false, message: '私信在权限里关掉了' }
-    const s = today(load())
-    if (paused(s)) return { ok: false, message: '今天暂停：' + s.pauseReason }
-    const msg = cleanText(text, 100)
-    if (!msg) return { ok: false, message: '私信内容不能是空的' }
-    return withSocialBusy(async () => {
-      const need = await requireIm()
-      if (!need.ok) return need
-      const parsed = parseUserInput(target) || (String(target).length > 20 ? { secUid: String(target).trim() } : null)
-      let secUid = parsed?.secUid || ''
-      let uid = ''
-      if (!secUid) {
-        // 抖音号 / 短链仍靠 CDP 解析
-        const booted = await boot()
-        if (!booted.ok) return { ok: false, message: booted.reason || booted.message }
-        const user = await resolveTarget(target)
-        if (!user.ok) return user
-        secUid = user.secUid
-      }
-      if ((s.dmTargets[secUid] || 0) >= 1) return { ok: false, message: '今天已经给这个人发过私信了（每人每天最多 1 条）' }
-      const r = await doWrite(s, 'dm', async () => {
-        await need.im.sendText({ uid, secUid }, msg)
-      }, { secUid, text: msg })
-      if (r.ok) {
-        if (!r.dryRun) {
-          s.dmTargets[secUid] = (s.dmTargets[secUid] || 0) + 1
-          memory?.addEvent?.({ text: `在抖音私信了别人：${msg.slice(0, 40)}`, tags: ['抖音'], importance: 0.4 })
-          save(s)
-        }
-      }
-      return r.ok ? { ok: true, message: r.dryRun ? '试运行：本来要发私信' : '私信发出去了' } : r
-    })
-  }
-
-  async function followUser(target) {
-    if (perm('douyinFollow') === 'off') return { ok: false, message: '关注在权限里关掉了' }
-    const s = today(load())
-    if (paused(s)) return { ok: false, message: '今天暂停：' + s.pauseReason }
-    const booted = await boot()
-    if (!booted.ok) return { ok: false, message: booted.reason || booted.message }
-    const user = await resolveTarget(target)
-    if (!user.ok) return user
-    const drv = ensureDriver()
-    const r = await doWrite(s, 'follow', async () => {
-      await drv.navigate(`https://www.douyin.com/user/${user.secUid}`)
-      const ok = await drv.clickFollow()
-      if (!ok) throw new Error('找不到关注按钮（可能已关注）')
-    }, { secUid: user.secUid, author: user.nickname })
-    if (r.ok && !r.dryRun) memory?.addEvent?.({ text: `在抖音关注了 ${user.nickname || user.secUid}`, tags: ['抖音'], importance: 0.35 })
-    return r.ok ? { ok: true, message: r.dryRun ? '试运行：本来要关注' : '关注好了' } : r
-  }
-
-  /** 工具：给当前 / 指定视频点赞。 */
-  async function likeVideo(link) {
-    if (perm('douyinLike') === 'off') return { ok: false, message: '点赞在权限里关掉了' }
-    const s = today(load())
-    const w = await watch(link)
-    if (!w.ok) return w
-    const drv = ensureDriver()
-    const r = await doWrite(s, 'like', async () => {
-      const ok = await drv.clickLike()
-      if (!ok) throw new Error('找不到点赞按钮')
-    }, { awemeId: w.awemeId })
-    return r.ok ? { ok: true, message: r.dryRun ? '试运行：本来要点赞' : '点赞好了' } : r
-  }
-
-  /** 工具：在视频下评论。 */
-  async function commentVideo(link, text) {
-    if (perm('douyinComment') === 'off') return { ok: false, message: '评论在权限里关掉了' }
-    const msg = cleanText(text, 100)
-    if (!msg) return { ok: false, message: '评论不能是空的' }
-    const s = today(load())
-    const w = await watch(link)
-    if (!w.ok) return w
-    const drv = ensureDriver()
-    const r = await doWrite(s, 'comment', async () => {
-      await drv.openComments()
-      const ok = await drv.typeAndSend(msg)
-      if (!ok) throw new Error('评论框打不开')
-    }, { awemeId: w.awemeId, text: msg })
-    if (r.ok && !r.dryRun) memory?.addEvent?.({ text: `在抖音评论：${msg.slice(0, 60)}`, tags: ['抖音'], importance: 0.4 })
-    return r.ok ? { ok: true, message: r.dryRun ? '试运行：本来要评论' : '评论发出去了' } : r
-  }
-
-  /** 工具：把视频分享到主人抖音。 */
-  /** 工具：把视频分享到主人抖音（IM segment.share；作品页仍可经 CDP watch）。 */
-  async function shareToOwner(link, text) {
-    if (perm('douyinShareOwner') === 'off') return { ok: false, message: '分享在权限里关掉了' }
-    if (!ownerConfirmed(getConfig())) return { ok: false, message: '还没核对主人的抖音号' }
-    return withSocialBusy(async () => {
-      const need = await requireIm()
-      if (!need.ok) return need
-      const s = today(load())
-      const w = await watch(link)
-      if (!w.ok) return w
-      const msg = cleanText(text || '分享给你', 80)
-      const ensured = await ensureOwnerUid()
-      if (!ensured.ok) return ensured
-      const target = { uid: ensured.uid, secUid: ensured.secUid || ownerImTarget().secUid }
-      const r = await doWrite(s, 'shareOwner', async () => {
-        await need.im.shareWork(target, { itemId: w.awemeId, title: w.desc, author: w.author }, msg)
-      }, { awemeId: w.awemeId, text: msg, secUid: target.secUid })
-      return r.ok ? { ok: true, message: r.dryRun ? '试运行：本来要分享' : '分享出去了' } : r
-    })
-  }
-
-  async function setSign(text) {
-    if (perm('douyinSign') === 'off') return { ok: false, message: '改抖音签名在权限里关掉了' }
-    const filtered = filterSignature(text)
-    if (!filtered.ok) return filtered
-    const s = today(load())
-    if (paused(s)) return { ok: false, message: '今天暂停：' + s.pauseReason }
-    if (s.lastSignText && s.lastSignText === filtered.text) {
-      return { ok: false, message: '今天已经改成这句签名了，不用再改' }
-    }
-    const booted = await boot()
-    if (!booted.ok) return { ok: false, message: booted.reason || booted.message }
-    const drv = ensureDriver()
-    const r = await doWrite(s, 'sign', async () => {
-      const out = await drv.editSignature(filtered.text)
-      if (!out?.ok) throw new Error(out?.message || '签名没改成')
-    }, { text: filtered.text })
-    if (r.ok && !r.dryRun) {
-      s.lastSignText = filtered.text
-      memory?.addEvent?.({ text: `把抖音签名改成：${filtered.text.slice(0, 60)}`, tags: ['抖音'], importance: 0.45 })
-      save(s)
-    }
-    return r.ok ? { ok: true, message: r.dryRun ? `试运行：本来要把抖音签名改成：${filtered.text}` : `抖音签名改好了：${filtered.text}` } : r
-  }
-
-  /** 工具：改抖音昵称（日上限默认 2，过写闸）。 */
-  async function setNickname(text) {
-    if (perm('douyinNickname') === 'off') return { ok: false, message: '改抖音昵称在权限里关掉了' }
-    const filtered = filterNickname(text)
-    if (!filtered.ok) return filtered
-    const s = today(load())
-    if (paused(s)) return { ok: false, message: '今天暂停：' + s.pauseReason }
-    if (s.lastNicknameText && s.lastNicknameText === filtered.text) {
-      return { ok: false, message: '今天已经改成这个昵称了，不用再改' }
-    }
-    const booted = await boot()
-    if (!booted.ok) return { ok: false, message: booted.reason || booted.message }
-    const drv = ensureDriver()
-    const r = await doWrite(s, 'nickname', async () => {
-      const out = await drv.editNickname(filtered.text)
-      if (!out?.ok) throw new Error(out?.message || '昵称没改成')
-    }, { text: filtered.text })
-    if (r.ok && !r.dryRun) {
-      s.lastNicknameText = filtered.text
-      s.selfNickname = filtered.text
-      memory?.addEvent?.({ text: `把抖音昵称改成：${filtered.text}`, tags: ['抖音'], importance: 0.45 })
-      save(s)
-    }
-    return r.ok ? { ok: true, message: r.dryRun ? `试运行：本来要把抖音昵称改成：${filtered.text}` : `抖音昵称改好了：${filtered.text}` } : r
-  }
-
-  /** 工具：换抖音头像。filePath 为本机可读图片路径（模块侧已解析 last/http/白名单本地）。 */
-  async function setAvatar(filePath) {
-    if (perm('douyinAvatar') === 'off') return { ok: false, message: '换抖音头像在权限里关掉了' }
-    const path = String(filePath || '').trim()
-    if (!path) return { ok: false, message: '没有头像文件' }
-    if (!existsSync(path)) return { ok: false, message: '找不到头像文件' }
-    let buf
-    try { buf = readFileSync(path) } catch (error) {
-      return { ok: false, message: '读不了头像文件：' + (error.message || error) }
-    }
-    if (!buf?.length) return { ok: false, message: '头像文件是空的' }
-    if (buf.length > AVATAR_MAX_BYTES) return { ok: false, message: `头像太大了，最多 ${Math.floor(AVATAR_MAX_BYTES / 1024 / 1024)}MB` }
-    const mime = sniffImageType(buf)
-    if (!mime) return { ok: false, message: '不是能认的图片（要 png / jpg / gif / webp）' }
-    const s = today(load())
-    if (paused(s)) return { ok: false, message: '今天暂停：' + s.pauseReason }
-    const booted = await boot()
-    if (!booted.ok) return { ok: false, message: booted.reason || booted.message }
-    const drv = ensureDriver()
-    const r = await doWrite(s, 'avatar', async () => {
-      const out = await drv.editAvatar(path)
-      if (!out?.ok) throw new Error(out?.message || '头像没换上')
-    }, { text: basename(path) })
-    if (r.ok && !r.dryRun) {
-      memory?.addEvent?.({ text: '换了抖音头像', tags: ['抖音'], importance: 0.45 })
-      save(s)
-    }
-    return r.ok ? { ok: true, message: r.dryRun ? '试运行：本来要换抖音头像' : '抖音头像换好了' } : r
-  }
-
-  async function watch(text) {
-    const id = findAwemeId(text)
+  /** 她看一个视频（别人发来的链接），返回给她看的内容。 */
+  async function watch(link) {
+    const id = await idOf(link)
     if (!id) return { ok: false, message: '没认出抖音视频链接' }
-    const booted = await boot()
-    if (!booted.ok) return { ok: false, message: booted.reason || booted.message }
-    const drv = ensureDriver()
-    let awemeId = id.awemeId
-    if (id.short) {
-      await drv.navigate(id.short)
-      if (!isFake()) await new Promise((r) => setTimeout(r, 1200))
-      awemeId = (await drv.activeAwemeId()) || awemeId
-    } else {
-      await drv.navigate(videoLink(awemeId))
+    const s = load()
+    try {
+      const r = await ready(s)
+      if (!r.ok) return r
+      const [v, comments] = await Promise.all([site.detail(id), site.comments(id).catch(() => [])])
+      memory?.addEvent?.({ text: `看了别人发来的抖音视频《${v.title}》`, tags: ['抖音'], importance: 0.4 })
+      record(s, { kind: 'look', awemeId: id, title: v.title, author: v.author })
+      return { ok: true, message: digestOf(v, comments), awemeId: id, title: v.title }
+    } catch (error) {
+      return { ok: false, message: '这个视频没打开：' + error.message }
+    } finally {
+      save(s)
     }
-    if (!awemeId) return { ok: false, message: '打不开这个视频' }
-    const s = today(load())
-    const v = { awemeId, author: '', desc: '', likes: 0, comments: 0, tags: [] }
-    const hit = (drv.recentFeed?.() || []).find((x) => x.awemeId === awemeId)
-    if (hit) Object.assign(v, hit)
-    memory?.addEvent?.({ text: `看了别人发来的抖音视频 ${awemeId}`, tags: ['抖音'], importance: 0.4 })
-    record(s, { kind: 'watch', awemeId, text: '（点开链接看的）' })
-    s.watched = (s.watched || 0) + 1
-    s.seen = [...new Set([...(s.seen || []), awemeId])].slice(-500)
-    save(s)
-    return { ok: true, message: digestOf(v), awemeId }
   }
 
-  let runStartedAt = 0
+  /** 主人让她点赞 / 评论某个视频。 */
+  async function act(kind, link, text) {
+    const id = await idOf(link)
+    if (!id) return { ok: false, message: '没认出抖音视频链接' }
+    if (busy) return { ok: false, message: '正在刷抖音，等这一轮刷完再说' }
+    busy = true
+    const s = load()
+    try {
+      const r = await ready(s)
+      if (!r.ok) return r
+      const v = await site.detail(id).catch(() => ({ title: '', author: '' }))
+      const title = v.title || id
+      const w = await doWrite(s, kind, { awemeId: id, title: v.title, author: v.author, ...(text ? { text } : {}) }, () => (kind === 'like' ? site.like(id) : site.comment(id, text)))
+      if (!w.ok) return w
+      if (w.dryRun) return { ok: true, message: `试运行：本来要${NAME[kind]}《${title}》` }
+      if (w.already) return { ok: true, message: `《${title}》之前就赞过了` }
+      memory?.addEvent?.({ text: kind === 'like' ? `在抖音给《${title}》点了赞` : `在抖音《${title}》下评论：${text.slice(0, 60)}`, tags: ['抖音'], importance: 0.4 })
+      return { ok: true, message: kind === 'like' ? `点赞了（《${title}》）` : `评论发出去了（《${title}》）` }
+    } finally {
+      save(s)
+      busy = false
+    }
+  }
+
+  const likeVideo = (link) => act('like', link)
+  async function commentVideo(link, text) {
+    const t = clip(text, 100)
+    if (!t) return { ok: false, message: '评论不能是空的' }
+    return act('comment', link, t)
+  }
+
+  /** 刷完的结果写成一段给她看的话（照实说，没分享就是没分享）。 */
+  function resultNote(r) {
+    if (!r.ok) return `【系统消息，不是对方说的】你刚才去刷抖音没刷成：${r.message}。照实跟对方说一声。`
+    const where = (via) => via.map((x) => (x === 'douyin' ? '抖音私信' : 'QQ')).join('和')
+    const shares = (r.sharedList || []).map((x) => `《${x.title}》（发到了${where(x.via)}）`)
+    return `【系统消息，不是对方说的】你刚刷完一轮抖音：看了 ${r.watched} 个，点赞 ${r.liked}，评论 ${r.commented}。` +
+      (shares.length ? `分享给${owner()}的：${shares.join('、')}。` : `这轮没有分享给${owner()}的视频。`) +
+      '照实跟对方说一两句，别说没做到的事。'
+  }
+
+  /**
+   * 让她去刷一会儿：后台刷，马上返回（一轮要好几分钟）。
+   * report = 从哪个聊天叫的：刷完把结果塞回那个聊天，让她照实说（不然她容易先说「已经发你了」）。
+   */
+  function browse({ ownerAsked = false, report = null } = {}) {
+    if (busy) return { ok: false, message: '已经在刷了，等这一轮刷完会告诉你结果' }
+    if (!cfg().enabled) return { ok: false, message: '抖音没打开' }
+    const c = cfg()
+    run({ force: true, ownerAsked }).then((r) => {
+      if (report) return hub.pushToSession?.(report, [{ type: 'text', text: resultNote(r) }], '')
+    }).catch((error) => log.warn('刷完报告结果出错：', error.message))
+    return { ok: true, message: `刚开始刷，这一轮看 ${c.perRun} 个左右，大概 ${Math.ceil((c.perRun * (c.dwellMin + c.dwellMax)) / 2 / 60) + 1} 分钟。现在还什么都没分享，刷完系统会把结果告诉你，在那之前别跟对方说「已经发了」。` }
+  }
+
+  /**
+   * 看主人的抖音私信，有新消息就用她的口气回（只认核对过的主人 uid，别人的私信不理）。
+   * 主人让她找视频时，她回复里带 [去刷抖音]，回完就去刷一轮，挑中的照样私信分享给主人。
+   */
+  async function checkOwnerDms() {
+    const o = ownerDy()
+    if (!o?.uid) return { ok: false, message: '还没核对主人的抖音号' }
+    if (busy) return { ok: false, message: '正在刷抖音，等会儿再看私信' }
+    busy = true
+    const s = load()
+    let wantBrowse = false
+    try {
+      s.lastDmCheck = now()
+      const r = await ready(s)
+      if (!r.ok) return r
+      const list = await site.dms(o.uid)
+      // 一条都没读到多半是页面还没加载好：别拿空列表当「看过了」，下次再看
+      if (!list.length) return { ok: false, message: '私信消息没读出来，等下次再看' }
+      const seen = new Set(s.dmSeen)
+      const fresh = list.filter((m) => m.uid === String(o.uid) && !seen.has(m.id))
+      // 主人的新消息等回成功了才记为看过（没发出去下次再试，同一条最多试 3 次）
+      const freshIds = new Set(fresh.map((m) => m.id))
+      const markSeen = (ids) => { s.dmSeen = [...new Set([...s.dmSeen, ...ids])].slice(-300) }
+      markSeen(list.map((m) => m.id).filter((id) => !freshIds.has(id)))
+      s.dmTries = s.dmTries || {}
+      for (const id of freshIds) if ((s.dmTries[id] = (s.dmTries[id] || 0) + 1) > 3) { markSeen([id]); freshIds.delete(id) }
+      const done = () => { markSeen([...freshIds]); for (const id of freshIds) delete s.dmTries[id] }
+      if (!s.dmInit) {
+        s.dmInit = true
+        done()
+        return { ok: true, replied: 0, message: '第一次看私信：之前的消息都记为看过，不回' }
+      }
+      // 太久以前的（比如 DSH 关着那段时间的）不回
+      if (!fresh.some((m) => freshIds.has(m.id) && now() - m.at < 30 * 60_000)) { done(); return { ok: true, replied: 0 } }
+      const who = (m) => (m.uid === String(o.uid) ? owner() : '你')
+      const line = (m) => `${who(m)}：${m.card ? `[分享了抖音视频《${m.card.title || '没标题'}》]` : m.text || '[表情或图片]'}`
+      const out = await hub.runSystemTurn('douyin-dm', '抖音 · 主人私信',
+        `【抖音私信：${owner()}在抖音上给你发消息，不是 QQ。用你平时的口气回，一两句就行，像发微信那样；不想回就只输出 [沉默]。这一轮不能用工具。` +
+        `你现在没在刷抖音。要是${owner()}让你去刷视频、找视频给他，就在回复最后单独加一行 [去刷抖音]，回完你才会真的去刷一轮，挑中的视频会私信分享给${owner()}（别说已经发了）。` +
+        `没写 [去刷抖音] 就不会去刷，那就别说自己在刷、马上去刷、已经发了这类话。】\n` +
+        `最近的私信（从旧到新）：\n${list.slice(-14).map(line).join('\n')}\n\n只输出要发的话。`,
+        { timeoutMs: 180000, noTools: true })
+      let text = typeof out === 'string' ? out : String(out?.text ?? out ?? '')
+      wantBrowse = /\[去刷抖音\]/.test(text)
+      text = text.replace(/\[去刷抖音\]/g, '').trim()
+      if (!text || isSilence(text)) { done(); return { ok: true, replied: 0 } }
+      const lines = text.split(/\n+|\|\|\|/).map((x) => clip(x, 300)).filter(Boolean).slice(0, 3)
+      let sent = 0
+      for (const msg of lines) {
+        if (getConfig().dryRun) log.info('试运行：本来要在抖音私信里回主人：', msg)
+        else await site.sendDm(msg)
+        sent++
+        record(s, { kind: getConfig().dryRun ? 'dry:dm' : 'dm', text: msg })
+        save(s)
+        if (sent < lines.length) await sleep(between(800, 2500))
+      }
+      done()
+      memory?.addEvent?.({ text: `在抖音私信里回了${owner()}：${lines.join(' ').slice(0, 60)}`, tags: ['抖音'], importance: 0.4 })
+      return { ok: true, replied: sent }
+    } catch (error) {
+      log.warn('看 / 回主人抖音私信出错：', error.message)
+      record(s, { kind: 'error', text: '私信没回成：' + error.message })
+      return { ok: false, message: error.message }
+    } finally {
+      save(s)
+      busy = false
+      // 刷完没分享成（被拦、出错）要在私信里照实说一声，别让她「我这就去翻」之后没下文
+      if (wantBrowse) {
+        run({ force: true, ownerAsked: true })
+          .then((r) => (r.ok && r.sharedList?.some((x) => x.via.includes('douyin')) ? null : tellOwnerDm(resultNote(r))))
+          .catch((error) => log.warn('私信里让她刷抖音出错：', error.message))
+      }
+    }
+  }
+
+  /** 在抖音私信里跟主人照实说一句（系统消息交给她，用她的口气说）。 */
+  async function tellOwnerDm(note) {
+    const o = ownerDy()
+    if (!o?.uid || busy) return
+    busy = true
+    const s = load()
+    try {
+      const out = await hub.runSystemTurn('douyin-dm', '抖音 · 主人私信',
+        `${note}\n这是在抖音私信里跟${owner()}说，一两句，像发微信那样；这一轮不能用工具，只输出要发的话。`,
+        { timeoutMs: 180000, noTools: true })
+      const text = String(typeof out === 'string' ? out : out?.text ?? out ?? '').replace(/\[去刷抖音\]/g, '').trim()
+      if (!text || isSilence(text)) return
+      await site.dms(o.uid) // 刷完浏览器停在推荐页，先回到和主人的会话
+      for (const msg of text.split(/\n+|\|\|\|/).map((x) => clip(x, 300)).filter(Boolean).slice(0, 2)) {
+        if (getConfig().dryRun) log.info('试运行：本来要在抖音私信里跟主人说：', msg)
+        else await site.sendDm(msg)
+        record(s, { kind: getConfig().dryRun ? 'dry:dm' : 'dm', text: msg })
+      }
+    } catch (error) {
+      log.warn('在抖音私信里跟主人说一声没成：', error.message)
+      record(s, { kind: 'error', text: '私信没说成：' + error.message })
+    } finally {
+      save(s)
+      busy = false
+    }
+  }
+
+  /** 每分钟调一次：醒着、到点了就刷一轮；隔几分钟看一眼主人的抖音私信。 */
   async function tick() {
     const g = getConfig()
     const c = g.douyin
-    if (!g.enabled || !c.enabled) return
+    if (!g.enabled || !c.enabled || busy) return
     const h = new Date(now()).getHours()
     if (h < g.speakUp.awakeFrom || h >= g.speakUp.awakeTo) return
-    const s = today(load())
-
-    if (busy && runStartedAt && now() - runStartedAt > 15 * 60_000) {
-      log.warn('刷抖音超过 15 分钟还没结束，强制解锁')
-      busy = false
+    const s = load()
+    if (c.ownerDm && ownerDy() && now() - (s.lastDmCheck || 0) >= c.dmPollMinutes * 60_000) {
+      await checkOwnerDms()
+      return
     }
-
-    const dmEvery = (c.dmPollMinutes || 7) * 60_000
-    const replyEvery = (c.replyPollMinutes || 25) * 60_000
-    if (now() - (s.lastDmCheck || 0) > dmEvery * (0.7 + Math.random() * 0.7)) {
-      if (ownerConfirmed(g) && perm('douyinReplyOwnerDm') !== 'off') await checkOwnerDms().catch((e) => log.debug(e.message))
-    }
-    if (now() - (s.lastReplyCheck || 0) > replyEvery) {
-      if (perm('douyinReplyComment') !== 'off') await checkCommentReplies().catch((e) => log.debug(e.message))
-    }
-
-    if (!c.autoBrowse || perm('douyinBrowse') === 'off') return
-    if (s.runs >= c.maxRunsPerDay) { s.lastSkipReason = '今天轮数满了'; save(s); return }
-    if (paused(s)) return
-    const due = s.nextDueAt || 0
-    if (due && now() < due) return
-    if (!due && s.lastRun && now() - s.lastRun < c.intervalHours * 3600_000) return
-    runStartedAt = now()
+    if (!c.autoBrowse) return
+    if (s.runs >= c.maxRunsPerDay || s.watched >= c.maxWatchPerDay) return
+    const due = s.nextDueAt || (s.lastRun ? s.lastRun + c.intervalHours * 3600_000 : 0)
+    if (now() < due) return
     await run()
-    runStartedAt = 0
   }
 
-  async function imStatus() {
+  /** 登录状态。force = 真去浏览器里查（会打开浏览器）；不 force 只给上次查到的。 */
+  async function account(force = false) {
+    const s = load()
+    if (!force) return s.account || { loggedIn: false, unknown: true }
     try {
-      const client = await ensureIm()
-      return client.status()
+      const r = await ready(s)
+      return { ...(s.account || { loggedIn: false }), ...(r.ok ? {} : { message: r.message }) }
     } catch (error) {
-      return { loggedIn: false, needLogin: true, reason: String(error?.message || error), uid: '', nickname: '' }
+      return { loggedIn: false, error: error.message }
+    } finally {
+      save(s)
     }
   }
 
-  async function startImLogin() {
+  /** 扫码登录：开始 / 轮询。返回 { loggedIn, shot }（shot 是登录弹窗截图）。 */
+  async function loginStep(start) {
+    const s = load()
     try {
-      const client = await ensureIm()
-      if (typeof client.startQrLogin === 'function') return client.startQrLogin()
-      if (typeof client.startLogin === 'function') return client.startLogin({ method: 'qr' })
-      return { ok: false, started: false, loggedIn: false, phase: 'error', message: '当前 IM 客户端不支持面板登录', qrDataUrl: '' }
-    } catch (error) {
-      return { ok: false, started: false, loggedIn: false, phase: 'error', message: String(error?.message || error), qrDataUrl: '' }
-    }
-  }
-
-  async function imLoginStatus() {
-    try {
-      const client = await ensureIm()
-      if (typeof client.getLoginStatus === 'function') return client.getLoginStatus()
-      const st = client.status()
-      return {
-        ok: true,
-        started: false,
-        loggedIn: !!st.loggedIn,
-        phase: st.loggedIn ? 'logged_in' : 'idle',
-        qrDataUrl: '',
-        message: st.loggedIn ? (`已登录：${st.nickname || st.uid}`) : (st.reason || '还没登录 IM'),
-        nickname: st.nickname || '',
-        uid: st.uid || '',
-        verifyHint: '',
-        error: '',
+      const r = start ? await site.loginStart() : await site.loginPoll()
+      if (!r.ok) return r
+      if (r.loggedIn) {
+        s.account = { at: now(), loggedIn: true, nickname: r.me.nickname, secUid: r.me.secUid, error: '' }
+        if (!s.loginAt) s.loginAt = now()
+        if (paused(s) && /登录/.test(s.pauseReason)) s.pauseDay = ''
+        await site.show(false).catch(() => {})
+        return { ok: true, loggedIn: true, message: `已登录：${r.me.nickname}` }
       }
+      return { ok: true, loggedIn: false, shot: r.shot, message: '用抖音 App 扫码；扫完要验证的话点「显示浏览器窗口」在窗口里完成' }
     } catch (error) {
-      return { ok: false, started: false, loggedIn: false, phase: 'error', message: String(error?.message || error), qrDataUrl: '' }
+      return { ok: false, message: error.message }
+    } finally {
+      save(s)
     }
   }
 
-  async function refreshImLogin() {
-    try {
-      const client = await ensureIm()
-      if (typeof client.refreshQrLogin === 'function') return client.refreshQrLogin()
-      return startImLogin()
-    } catch (error) {
-      return { ok: false, started: false, loggedIn: false, phase: 'error', message: String(error?.message || error), qrDataUrl: '' }
-    }
+  /** 把浏览器窗口挪到屏幕里给人看（处理验证码、短信验证）/ 挪回去。 */
+  async function showWindow(visible) {
+    const r = await site.ensure()
+    if (!r.ok) return r
+    await site.show(Boolean(visible))
+    return { ok: true, message: visible ? '浏览器窗口挪到屏幕上了，处理完点「收起窗口」' : '窗口收起来了' }
   }
 
-  async function submitImLoginSms(code) {
-    try {
-      const client = await ensureIm()
-      if (typeof client.submitLoginSms === 'function') return client.submitLoginSms(code)
-      return { ok: false, started: true, loggedIn: false, phase: 'sms_required', message: '当前 IM 客户端不支持面板填验证码', qrDataUrl: '' }
-    } catch (error) {
-      return { ok: false, started: false, loggedIn: false, phase: 'error', message: String(error?.message || error), qrDataUrl: '' }
-    }
-  }
-
-  async function startBrowserLogin() {
-    try {
-      const d = ensureDriver()
-      if (typeof d.startLoginQr === 'function') return d.startLoginQr()
-      const r = await account(true)
-      return {
-        ok: !r.error,
-        started: !!r.needLogin,
-        loggedIn: !!r.isLogin,
-        phase: r.isLogin ? 'logged_in' : (r.verify ? 'verification_required' : (r.needLogin ? 'waiting_scan' : 'idle')),
-        qrDataUrl: '',
-        message: r.isLogin ? (`已登录：${r.nickname || r.secUid}`) : (r.reason || r.error || '请扫码登录'),
-        verifyHint: r.verify ? (r.reason || '需要安全验证') : '',
-        nickname: r.nickname || '',
-        error: r.error || '',
-      }
-    } catch (error) {
-      return { ok: false, started: false, loggedIn: false, phase: 'error', message: String(error?.message || error), qrDataUrl: '' }
-    }
-  }
-
-  async function browserLoginStatus() {
-    try {
-      const d = ensureDriver()
-      if (typeof d.pollLoginQr === 'function') {
-        // 已在登录流程中则只轮询；否则用 account 轻量检查
-        const snap = await d.pollLoginQr()
-        if (snap.loggedIn) {
-          const s = today(load())
-          if (!s.loginAt) { s.loginAt = now(); save(s) }
-        }
-        return snap
-      }
-      return startBrowserLogin()
-    } catch (error) {
-      return { ok: false, started: false, loggedIn: false, phase: 'error', message: String(error?.message || error), qrDataUrl: '' }
-    }
-  }
-
-  async function refreshBrowserLogin() {
-    try {
-      const d = ensureDriver()
-      if (typeof d.refreshLoginQr === 'function') return d.refreshLoginQr()
-      return startBrowserLogin()
-    } catch (error) {
-      return { ok: false, started: false, loggedIn: false, phase: 'error', message: String(error?.message || error), qrDataUrl: '' }
-    }
-  }
-
+  /** 面板读的状态。只读文件，不碰浏览器。 */
   function state() {
-    const s = today(load())
+    const s = load()
+    const c = cfg()
     return {
-      runs: s.runs, watched: s.watched, writes: s.writes || 0,
-      like: s.like, comment: s.comment, replyComment: s.replyComment,
-      follow: s.follow, dm: s.dm, shareOwner: s.shareOwner, dmReply: s.dmReply,
-      sign: s.sign || 0, nickname: s.nickname || 0, avatar: s.avatar || 0,
-      lastSignText: s.lastSignText || '', lastNicknameText: s.lastNicknameText || '',
-      lastRun: s.lastRun, nextDueAt: s.nextDueAt, lastSkipReason: s.lastSkipReason,
-      history: (s.history || []).slice(0, 20),
-      pauseReason: paused(s) ? s.pauseReason : '',
-      disabledOps: { ...s.disabledOps },
-      newAccount: isNewAccount(s),
-      ownerConfirmed: ownerConfirmed(getConfig()),
-      socialBusy,
-      owner: {
-        input: cfg().owner?.input || '',
-        secUid: cfg().owner?.secUid || '',
-        uid: cfg().owner?.uid || '',
-        nickname: cfg().owner?.nickname || '',
-        hasAvatar: Boolean(cfg().owner?.avatar),
-      },
+      runs: s.runs, watched: s.watched, like: s.like, comment: s.comment, share: s.share, writes: s.writes,
+      atOwner: s.atOwner, owner: ownerDy() ? { nickname: ownerDy().nickname } : null,
+      caps: { like: capOf(s, 'like'), comment: capOf(s, 'comment'), share: capOf(s, 'share'), atOwner: capOf(s, 'atOwner'), writes: isNew(s) ? Math.floor(c.gate.maxWritesPerDay / 2) : c.gate.maxWritesPerDay },
+      newAccount: isNew(s), lastRun: s.lastRun, nextDueAt: s.nextDueAt, lastSkipReason: s.lastSkipReason,
+      pauseReason: paused(s) ? s.pauseReason : '', account: s.account, busy, browserOpen: site.connected(),
+      history: s.history.slice(0, 30),
     }
   }
 
-  return {
-    run, tick, watch, dmTo, followUser, likeVideo, commentVideo, shareToOwner,
-    setSign, setNickname, setAvatar,
-    checkOwnerDms, checkCommentReplies, confirmOwner, account, imStatus, startImLogin, imLoginStatus, refreshImLogin, submitImLoginSms, startBrowserLogin, browserLoginStatus, refreshBrowserLogin, state,
-    setDriver: (d) => { driver = d },
-    setIm: (c) => { im = c },
-    _setSocialBusy: (v) => { socialBusy = !!v },
-  }
+  return { run, browse, watch, likeVideo, commentVideo, confirmOwner, checkOwnerDms, tick, account, loginStep, showWindow, state }
 }

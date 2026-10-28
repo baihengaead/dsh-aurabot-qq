@@ -129,9 +129,11 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-deep:#9cc4f5;--ab-sea:#6
 .ab-stickers{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:10px}
 .ab-sticker{border:1px solid var(--ab-line);border-radius:12px;padding:8px;background:var(--ab-card);display:flex;flex-direction:column;gap:6px;position:relative}
 .ab-sticker img{width:100%;aspect-ratio:1;object-fit:contain;border-radius:8px;background:var(--ab-card-2)}
-.ab-sticker .nm{font-size:12px;border:0;background:transparent;color:var(--ab-text);text-align:center;width:100%;outline:none;padding:2px;border-radius:6px}
-.ab-sticker .nm:focus{background:var(--ab-card-2)}
-.ab-sticker .tg{font-size:11px;color:var(--ab-dim);text-align:center;min-height:16px}
+.ab-sticker .nm,.ab-sticker .tg{border:1px dashed transparent;background:transparent;text-align:center;width:100%;outline:none;padding:2px 4px;border-radius:6px;box-sizing:border-box}
+.ab-sticker .nm{font-size:12px;color:var(--ab-text)}
+.ab-sticker .tg{font-size:11px;color:var(--ab-dim);min-height:16px}
+.ab-sticker:hover .nm,.ab-sticker:hover .tg{border-color:var(--ab-line)}
+.ab-sticker .nm:focus,.ab-sticker .tg:focus{background:var(--ab-card-2);border-style:solid;border-color:var(--ab-line)}
 .ab-sticker .x{position:absolute;top:4px;right:4px;opacity:0;transition:opacity .15s}
 .ab-sticker:hover .x{opacity:1}
 .ab-shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:10px}
@@ -621,6 +623,23 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h('span', { className: 'ab-muted ab-small' }, 'SnowLuma 是独立的第三方项目，仅限个人非商业使用；使用非官方 QQ 工具有账号风险，请用小号。')))
     }
 
+    /** 用什么接 QQ：插件帮你管 SnowLuma，或接你已有的 OneBot v11 机器人。 */
+    function GatewayChoice({ draft, setDraft }) {
+      return h(Choices, { value: draft.gateway || 'snowluma', onChange: (v) => setDraft(setPath(draft, 'gateway', v)), options: [
+        { value: 'snowluma', label: '用 SnowLuma（Windows，推荐）', desc: '插件帮你启动、接入机器人号、断线重连' },
+        { value: 'onebot', label: '接我已有的 OneBot 机器人', desc: 'NapCat、LLOneBot、Lagrange、Docker 里的 SnowLuma 等任何 OneBot v11 实现；Linux / Docker 部署选这个' },
+      ] })
+    }
+
+    /** 已有 OneBot 机器人的地址和令牌。 */
+    function OneBotFields({ draft, f }) {
+      return h(Fragment, null,
+        h(Row, { label: 'WebSocket 地址', hint: '正向 WebSocket（OneBot v11），收消息靠它，必填。DSH 在 Docker 里的话，要填 DSH 容器能访问到的地址' }, f.text('snowluma.wsUrl', { size: 'wide', placeholder: 'ws://127.0.0.1:3001' })),
+        h(Row, { label: 'WebSocket 令牌', hint: '对方设了 access_token 就填，没设留空' }, f.text('snowluma.wsToken', { type: 'password', placeholder: draft.snowluma.wsTokenSet ? '已保存' : '没有就留空' })),
+        h(Row, { label: 'HTTP 地址', hint: '可选。填了就用 HTTP 调接口，不填就都走 WebSocket' }, f.text('snowluma.httpUrl', { size: 'wide', placeholder: 'http://127.0.0.1:3000' })),
+        h(Row, { label: 'HTTP 令牌' }, f.text('snowluma.httpToken', { type: 'password', placeholder: draft.snowluma.httpTokenSet ? '已保存' : '没有就留空' })))
+    }
+
     function Connect({ st, draft, setDraft, toast, reload, openWizard }) {
       const f = useField(draft, setDraft)
       const sl = st.snowluma
@@ -629,9 +648,18 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const loadProcs = async () => { const r = await get('/snowluma/processes'); setProcs(r.list || []); if (!r.ok) toast(r.message) }
       const act = (p) => async () => { const r = await post(p); toast(r.message || (r.ok ? '好了' : '没成功')); reload() }
       const login = st.onebot.login
+      const external = draft.gateway === 'onebot'
+      const testBtns = h('div', { className: 'ab-flex', style: { marginTop: 8 } },
+        h(Btn, { small: true, onClick: async () => { const r = await get('/onebot/test'); toast(r.message) } }, '测试连接'),
+        h(Btn, { small: true, onClick: async () => { const r = await post('/onebot/reconnect'); toast(r.message, r.ok ? 'ok' : 'err'); reload() } }, '重新连接'))
       return h('div', { className: 'ab-grid' },
+        h(Card, { title: '用什么接 QQ', right: openWizard ? h(Btn, { small: true, kind: 'ghost', onClick: openWizard }, '重新走一遍设置向导') : null }, h(GatewayChoice, { draft, setDraft })),
+        external ? h(Card, { title: '接上 QQ（已有的 OneBot 机器人）', desc: '让你的 OneBot 服务登录机器人号 ' + (draft.botQQ || '') + '，把它的正向 WebSocket 地址填在这里，保存后插件就会去连。插件只连接，不会启动或注入任何东西；连上后会先核对登录的是不是机器人号，不是就断开。' },
+          h(OneBotFields, { draft, f }),
+          h(Row, { label: '机器人 QQ 号' }, f.text('botQQ')),
+          testBtns) :
         h(Card, { title: '接上 QQ（SnowLuma）', desc: 'SnowLuma 是让机器人号上线的 QQ 网关。按协议规定它需要你自己下载、解压并同意它的用户协议；控制台密码、启动、接入、断线重连都交给 Aurabot。',
-          right: openWizard ? h(Btn, { small: true, kind: 'ghost', onClick: openWizard }, '重新走一遍设置向导') : null },
+          },
           h('div', { className: 'ab-steps' },
             h('div', { className: cx('ab-step', sl.installed && 'done') }, h('div', null,
               h('b', null, '下载 SnowLuma'), h('div', { className: 'ab-muted ab-small' }, '打开官方发布页，下载 Windows 完整版（名字类似 SnowLuma-v2.x.x-win-x64.zip，不带 lite）。'),
@@ -664,6 +692,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                 h('td', null, p.injected ? (p.connected ? '已接入' : '已注入，连接中') : '未接入'),
                 h('td', null, p.isBot ? h('span', { className: 'ab-badge' }, '机器人号') : h('span', { className: 'ab-muted ab-small' }, '不会碰'))))))) : null,
         ),
+        h(Card, { title: 'QQ 会话放在哪', desc: '每个 QQ 私聊 / 群都是 DSH 里「Aurabot · QQ」工作区下的一个会话，她在会话里读写文件也在这个文件夹。改了以后新开的会话放到新位置；已有的会话还在原来的地方，想全部挪过去就在「概览」点「重新开始所有 QQ 会话」。' },
+          h(Row, { label: '工作区文件夹', hint: '填完整路径（比如 D:\\Aurabot\\qq-chats）；留空 = 默认位置' }, f.text('workspaceDir', { size: 'wide', placeholder: st.workspaceDir || '' })),
+          h('div', { className: 'ab-muted ab-small' }, '现在用的：' + (st.workspaceDir || '—'))),
         h(Card, { title: '连接状态' },
           h('div', { className: 'ab-kv' },
             h('span', null, 'QQ 网关'), h('span', null, h('span', { className: 'ab-flex' }, h('i', { className: cx('ab-dot', conn ? 'ok' : st.onebot.state === 'connecting' ? 'warn' : 'err') }), { connected: '已连上', connecting: '连接中', disconnected: '断开了，正在重连', stopped: '没启动（总开关关着）', unconfigured: '还没配置' }[st.onebot.state] || st.onebot.state)),
@@ -674,7 +705,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           !conn && st.onebot.problem ? h('div', { className: 'ab-note warn', style: { marginTop: 10 } }, st.onebot.problem) : null,
           h('div', { className: 'ab-flex', style: { marginTop: 10 } }, h(Btn, { small: true, onClick: async () => { const r = await post('/onebot/reconnect'); toast(r.message, r.ok ? 'ok' : 'err'); reload() } }, '重新连接')),
         ),
-        h(Card, { title: '高级', desc: '一般不用动：地址和令牌会自动从 SnowLuma 的配置里读。' },
+        external ? null : h(Card, { title: '高级', desc: '一般不用动：地址和令牌会自动从 SnowLuma 的配置里读。' },
           h(Row, { label: '机器人 QQ 号' }, f.text('botQQ')),
           h(Row, { label: '控制台端口' }, f.num('snowluma.webuiPort', { min: 1, max: 65535 })),
           h(Row, { label: '控制台密码', hint: '默认由插件自动生成，上面「显示密码」能看到。想自己定一个就填在这里，保存后会真的改到 SnowLuma 上（至少 10 位，要有大小写字母和符号，不能有空格）' }, f.text('snowluma.webuiPassword', { type: 'password', placeholder: draft.snowluma.webuiPasswordSet ? (draft.snowluma.passwordAuto ? '自动管理中（不改就留空）' : '已保存（不改就留空）') : '留空 = 自动' })),
@@ -795,7 +826,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       ]
       const row = (key, label, hint) => h(Row, { label, hint },
         h(Choices, { value: perms[key] || 'owner', onChange: (v) => setDraft(setPath(draft, 'profilePerms.' + key, v)), options: opts }))
-      return h(Card, { title: '改资料与名单', desc: '她能不能听人的话改自己的 QQ 昵称、签名、头像和 B 站签名，处理好友申请、改白名单，以及抖音上的各项操作（含改签名/昵称/头像）。改 QQ 资料要 SnowLuma 支持（set_qq_profile / set_self_longnick / set_qq_avatar）。抖音各项默认仅主人，要放开自己在这里开。' },
+      return h(Card, { title: '改资料与名单', desc: '她能不能听人的话改自己的 QQ 昵称、签名、头像和 B 站签名，处理好友申请、改白名单，以及抖音上的浏览、点赞、评论、分享。改 QQ 资料要 SnowLuma 支持（set_qq_profile / set_self_longnick / set_qq_avatar）。抖音各项默认仅主人，要放开自己在这里开。' },
         row('qqNickname', 'QQ 昵称'),
         row('qqSignature', 'QQ 个性签名'),
         row('qqAvatar', 'QQ 头像', '只用网址图片，或「刚才发的那张图」。'),
@@ -803,17 +834,10 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         row('biliAvatar', 'B 站头像', '要先在 B 站页登录并打开 B 站。图片网址或刚才发的图，最大 2MB。'),
         row('qqFriendRequest', '处理好友申请', '让她通过 / 拒绝别人加她为好友的申请。她自己主动加别人暂不支持（SnowLuma 没有这个接口）。'),
         row('whitelist', '改白名单', '让她把 QQ 号 / 群号加进或移出下面的白名单。主人不会被移出。开成「所有人」前请想清楚。'),
-        row('douyinBrowse', '刷抖音 / 看视频', '定时刷推荐、点开别人发来的抖音链接。默认仅主人。'),
-        row('douyinLike', '抖音点赞', '刷到视频时顺手点赞。'),
-        row('douyinComment', '抖音评论', '刷到视频时发评论。'),
-        row('douyinReplyComment', '回抖音评论', '别人回她评论时接着回。'),
-        row('douyinFollow', '抖音关注', '仅工具请求（douyin_follow）；刷流不会自动关注。'),
-        row('douyinDm', '私信任何人', '建议用小号。别人让她发私信时用。'),
-        row('douyinShareOwner', '分享给主人抖音', '好玩的视频私信分享到你的抖音。要先在「抖音」页核对你的号。'),
-        row('douyinReplyOwnerDm', '回主人抖音私信', '只回已核对 sec_uid 的你；认不出对方绝不回。'),
-        row('douyinSign', '改抖音签名', '工具 douyin_set_sign；每天有次数上限（默认 2）。'),
-        row('douyinNickname', '改抖音昵称', '工具 douyin_set_nickname；每天有次数上限（默认 2）。'),
-        row('douyinAvatar', '换抖音头像', '工具 douyin_set_avatar；每天最多 1 次。图片网址 / 刚才那张图 / 数据目录本地图。'),
+        row('douyinBrowse', '刷抖音 / 看视频', '让她去刷推荐（douyin_browse）、点开别人发来的抖音链接（douyin_watch）。定时自己刷不受这项限制。'),
+        row('douyinLike', '抖音点赞', '有人让她给某个视频点赞；关掉后她自己刷的时候也不点赞。'),
+        row('douyinComment', '抖音评论', '有人让她去某个视频下评论；关掉后她自己刷的时候也不评论。'),
+        row('douyinShareOwner', '分享抖音给主人', '刷到好玩的视频在 QQ 私聊里发给你（她的话 + 链接）。'),
       )
     }
 
@@ -1098,6 +1122,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       return h('div', { className: 'ab-grid' },
         h(Card, { title: '表情包', right: f.sw('stickers.enabled'), desc: '回复里写 <sticker:名字> 就会发对应的表情；也会按概率自动配一张。' },
           h(Row, { label: '自动配表情的概率' }, f.percent('stickers.autoChance')),
+          h(Row, { label: '夹 QQ 小黄脸', hint: '回复里能夹 QQ 自带的系统表情（/捂脸 /斜眼笑 这种），和文字在同一条消息里' }, f.sw('stickers.faces')),
           h(Row, { label: '偷表情', hint: '别人发的表情包会被收藏（普通照片不收）。' }, f.sw('stickers.collect'), h('span', { className: 'ab-muted' }, '从群里'), f.sw('stickers.fromGroups'), h('span', { className: 'ab-muted' }, '从私聊'), f.sw('stickers.fromPrivate')),
           h(Row, { label: '偷表情方式', hint: '这三种都会听主人使唤：主人让她收哪张，她就收哪张' },
             draft.stickers.collect ? f.choices('stickers.collectMode', [
@@ -1121,21 +1146,26 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       )
     }
 
+    /** 一张表情：名字（备注）和标签都能直接改，改完离开输入框就保存（#31：模型起的名字 / 标签不对时手动纠正）。 */
     function StickerCell({ it, onChanged, toast }) {
       const [name, setName] = useState(it.name || '')
-      // 名字可能是别处改的（她在 QQ 里自己改、或者另一个窗口改的）：props 变了要跟着更新。
-      // 不更新的话刷新后面板还显示旧名字，而且输入框一失焦就会把旧名字提交回去，覆盖掉刚改好的。
+      const tagText = (it.tags || []).join(' ')
+      const [tags, setTags] = useState(tagText)
+      // 名字/标签可能是别处改的（她在 QQ 里自己改、或者另一个窗口改的）：props 变了要跟着更新。
+      // 不更新的话刷新后面板还显示旧内容，而且输入框一失焦就会把旧值提交回去，覆盖掉刚改好的。
       useEffect(() => { setName(it.name || '') }, [it.name])
+      useEffect(() => { setTags((it.tags || []).join(' ')) }, [tagText])
+      const save = async (body, label) => {
+        const r = await post('/sticker/rename', { md5: it.md5, ...body })
+        toast(r.ok ? label + '改好了' : '没改成：' + (r.message || '找不到这张表情'), r.ok ? 'ok' : 'err')
+        if (r.ok) onChanged()
+      }
       return h('div', { className: 'ab-sticker' },
         h('img', { src: API + '/sticker/image?md5=' + it.md5, alt: it.name || '表情', loading: 'lazy' }),
-        h('input', { className: 'nm', value: name, placeholder: '未命名', maxLength: 12, onChange: (e) => setName(e.target.value),
-          onBlur: async () => {
-            if (name === (it.name || '')) return
-            await post('/sticker/rename', { md5: it.md5, name })
-            toast('改好了')
-            onChanged()
-          } }),
-        h('div', { className: 'tg' }, (it.tags || []).join(' · ')),
+        h('input', { className: 'nm', value: name, placeholder: '未命名（点这里改）', title: '名字 / 备注，最多 12 字', maxLength: 12, onChange: (e) => setName(e.target.value),
+          onBlur: () => { if (name !== (it.name || '')) save({ name }, '名字') } }),
+        h('input', { className: 'tg', value: tags, placeholder: '加标签，空格隔开', title: '标签，空格或逗号隔开，最多 5 个', onChange: (e) => setTags(e.target.value),
+          onBlur: () => { if (tags.trim() !== tagText) save({ tags: tags.split(/[\s,，、#]+/).map((x) => x.trim()).filter(Boolean).slice(0, 5) }, '标签') } }),
         h('button', { type: 'button', className: 'ab-btn sm danger x', title: '删除', onClick: async () => { if (!confirm('删掉这张表情？（QQ 收藏里也会删）')) return; await post('/sticker/delete', { md5: it.md5 }); onChanged() } }, '✕'),
       )
     }
@@ -1965,203 +1995,113 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       )
     }
 
-    const DOUYIN_KIND = { watch: '看了', like: '点赞', comment: '评论', replyComment: '回评论', follow: '关注', share: '分享给你', dm: '私信', dmReply: '回你私信', error: '没成功' }
+    const DOUYIN_KIND = { watch: '看了', look: '点开看', like: '点赞', comment: '评论', share: '分享给你', dm: '回你私信', 'dry:dm': '试运行·私信', 'dry:like': '试运行·点赞', 'dry:comment': '试运行·评论', error: '没成功' }
 
-    /** 抖音：专用 Edge 登录、定时刷、点赞 / 评论 / 关注 / 私信、分享给主人、回主人私信。 */
+    /** 抖音：专用浏览器扫码登录、定时刷、点赞 / 评论、在 QQ 上分享给主人，以及她刷过什么。 */
     function Douyin({ draft, setDraft, toast }) {
       const f = useField(draft, setDraft)
       const [s, setS] = useState(null)
       const [busy, setBusy] = useState('')
-      const [brLogin, setBrLogin] = useState(null)
-      const [imLogin, setImLogin] = useState(null)
-      const [smsCode, setSmsCode] = useState('')
+      const [login, setLogin] = useState(null) // 扫码进行中：{ shot, message }
+      // 只读状态：打开这一页不会启动浏览器
       const load = () => get('/douyin/state').then(setS)
       useEffect(() => { load() }, [])
-      const loginPhaseText = (p) => ({
-        waiting_scan: '等待扫码',
-        scanned: '已扫待确认',
-        logged_in: '已登录',
-        expired: '过期，点刷新',
-        sms_required: '需要短信验证码',
-        voice_required: '需要语音验证码',
-        verification_required: '需要安全验证',
-        error: '登录失败',
-        idle: '',
-      })[p] || p || ''
-      const toastLogin = (r, okFallback) => {
-        if (r.loggedIn) toast(r.message || okFallback || '已登录', 'ok')
-        else if (r.ok && (r.started || r.qrDataUrl || ['waiting_scan', 'scanned', 'sms_required', 'voice_required', 'verification_required', 'expired'].includes(r.phase))) toast(r.message || loginPhaseText(r.phase) || '请扫码')
-        else toast(r.message || '没成功', 'err')
-      }
-      const act = (path, label, body) => async () => { setBusy(label); const r = body !== undefined ? await post(path, body) : await post(path); setBusy(''); toast(r.message || (r.ok ? '好了' : '没成功'), r.ok ? 'ok' : 'err'); load() }
+      const act = (path, label, body) => async () => { setBusy(label); const r = await post(path, body); setBusy(''); toast(r.message || (r.ok ? '好了' : '没成功'), r.ok ? 'ok' : 'err'); load() }
       useEffect(() => {
-        const active = brLogin && ['waiting_scan', 'scanned', 'verification_required'].includes(brLogin.phase)
-        if (!active) return undefined
+        if (!login) return undefined
         const t = setInterval(async () => {
-          const r = await get('/douyin/browser-login/status')
-          setBrLogin(r)
-          if (r.loggedIn) { toast(r.message || '浏览器已登录', 'ok'); load() }
-        }, 2000)
+          const r = await get('/douyin/login/status')
+          if (r.loggedIn) { setLogin(null); toast(r.message, 'ok'); load() } else if (r.ok) setLogin(r)
+        }, 2500)
         return () => clearInterval(t)
-      }, [brLogin && brLogin.phase])
-      useEffect(() => {
-        const active = imLogin && ['waiting_scan', 'scanned', 'sms_required', 'voice_required', 'verification_required'].includes(imLogin.phase)
-        if (!active) return undefined
-        const t = setInterval(async () => {
-          const r = await get('/douyin/im-login/status')
-          setImLogin(r)
-          if (r.loggedIn) { toast(r.message || 'IM 已登录', 'ok'); load() }
-        }, 2000)
-        return () => clearInterval(t)
-      }, [imLogin && imLogin.phase])
-      const startBrowserLogin = async () => {
+      }, [Boolean(login)])
+      const startLogin = async () => {
         setBusy('login')
-        const r = await post('/douyin/browser-login')
+        const r = await post('/douyin/login')
         setBusy('')
-        setBrLogin(r)
-        toastLogin(r, '浏览器已登录')
-        load()
-      }
-      const refreshBrowserLogin = async () => {
-        setBusy('login')
-        const r = await post('/douyin/browser-login/refresh')
-        setBusy('')
-        setBrLogin(r)
-        toastLogin(r, '浏览器已登录')
-        load()
-      }
-      const startImQrLogin = async () => {
-        setBusy('imlogin')
-        const r = await post('/douyin/im-login')
-        setBusy('')
-        setImLogin(r)
-        toastLogin(r, 'IM 已登录')
-        load()
-      }
-      const refreshImQrLogin = async () => {
-        setBusy('imlogin')
-        const r = await post('/douyin/im-login/refresh')
-        setBusy('')
-        setImLogin(r)
-        toastLogin(r, 'IM 已登录')
-        load()
-      }
-      const submitImSms = async () => {
-        setBusy('imsms')
-        const r = await post('/douyin/im-login/sms', { code: smsCode })
-        setBusy('')
-        setImLogin(r)
-        toastLogin(r, 'IM 已登录')
-        if (r.loggedIn) setSmsCode('')
-        load()
+        if (r.loggedIn) { toast(r.message, 'ok'); load() } else if (r.ok) setLogin(r)
+        else toast(r.message || '打不开浏览器', 'err')
       }
       const acct = s && s.account
-      const im = s && s.im
-      const owner = (draft.douyin && draft.douyin.owner) || {}
-      const qrBox = (login, kind) => {
-        if (!login || login.phase === 'idle') return null
-        return h('div', { style: { marginTop: 8, display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' } },
-          login.qrDataUrl ? h('img', {
-            src: login.qrDataUrl,
-            alt: kind + ' 登录二维码',
-            width: 168,
-            height: 168,
-            style: { width: 168, height: 168, borderRadius: 8, background: '#fff', border: '1px solid var(--ab-border, #333)', objectFit: 'contain' },
-          }) : null,
-          h('div', { className: 'ab-small', style: { minWidth: 160, flex: 1 } },
-            h('div', { style: { color: login.loggedIn ? 'var(--ab-ok)' : (login.phase === 'error' || login.phase === 'expired' ? 'var(--ab-warn)' : 'inherit') } },
-              login.loggedIn ? (login.message || '已登录') : (loginPhaseText(login.phase) || login.message || '')),
-            login.message && !login.loggedIn ? h('div', { className: 'ab-muted', style: { marginTop: 4 } }, login.message) : null,
-            login.verifyHint ? h('div', { className: 'ab-note warn', style: { marginTop: 6 } }, login.verifyHint) : null,
-            login.error ? h('div', { className: 'ab-note warn', style: { marginTop: 6 } }, login.error) : null,
-          ))
-      }
+      const acctText = !acct || acct.unknown ? h('span', { className: 'ab-small ab-muted' }, '还没检查过') :
+        h('span', { className: 'ab-small', style: { color: acct.loggedIn ? 'var(--ab-ok)' : 'var(--ab-warn)' } },
+          acct.loggedIn ? '已登录：' + (acct.nickname || '') : (acct.message || acct.error || '还没登录'),
+          acct.at ? h('span', { className: 'ab-muted' }, ' · ' + timeAgo(acct.at) + '查的') : null)
+      const caps = (s && s.caps) || {}
       return h('div', { className: 'ab-grid' },
-        h(Card, { title: '刷抖音', right: f.sw('douyin.enabled'), desc: '内容（刷流/点赞/评论/关注/改资料）用专用 Edge（CDP）；社交（私信、分享给你、回你私信）走 douyin-im，不经浏览器。关注不会在刷流里自动做。总开关默认关——先分别在面板扫码登录浏览器和 IM，再打开开关。' },
-          h(Row, { label: '浏览器路径', hint: '留空 = 自动找 Edge（找不到再找 Chrome）' }, f.text('douyin.browserPath', { size: 'wide', placeholder: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe' })),
-          h(Row, { label: '登录完最小化窗口', hint: '登录时窗口离屏，二维码在面板显示，不抢前台；登录成功后可最小化' }, f.sw('douyin.minimize')),
-          h(Row, { label: '社交打断刷流', hint: '私信/分享进行中时中断刷流，原因写入「上次跳过」' }, f.sw('douyin.socialInterruptBrowse')),
-          h(Row, { label: '分享倾向', hint: '刷到好看的视频时，要不要积极私信分享给你（可调 think 提示）' }, f.choices('douyin.shareBias', [
-            { value: 'proactive', label: '积极', desc: '好看有趣就推，额度没用完尽量分享' },
-            { value: 'normal', label: '适中', desc: '觉得你会喜欢才写 share' },
-            { value: 'stingy', label: '惜分享', desc: '拿不准就空着' },
-          ])),
-          h(Row, { label: '浏览器登录', hint: 'Edge 离屏打开，二维码截到本面板；每 2 秒轮询登录态；过期点刷新' },
+        h(Card, { title: '刷抖音', right: f.sw('douyin.enabled'), desc: '她用一个专用浏览器（独立的登录资料，不碰你平时用的浏览器）刷抖音：定时打开推荐，一个个点开看，读标题、分类、抖音给的内容摘要和热评，再按自己的性格决定点不点赞、评不评论（特别想让你看的会在评论里 @你）、要不要在 QQ 上分享给你、记住什么。你在 QQ 里发抖音链接，她也能点开看完再聊。浏览器窗口放在屏幕外，不抢前台。总开关默认关：先扫码登录，再打开。' },
+          h(Row, { label: '抖音账号', hint: '建议用小号。扫一次码就行，登录状态存在专用浏览器里' },
             h('div', null,
               h('div', { className: 'ab-flex' },
-                h(Btn, { small: true, onClick: startBrowserLogin, disabled: !!busy }, busy === 'login' ? '正在获取二维码…' : '开始浏览器登录'),
-                h(Btn, { small: true, onClick: refreshBrowserLogin, disabled: !!busy }, '刷新二维码'),
-                h(Btn, { small: true, onClick: async () => { const r = await get('/douyin/account'); setS({ ...(s || {}), account: r }) } }, '检查'),
-                acct ? h('span', { className: 'ab-small', style: { color: acct.isLogin ? 'var(--ab-ok)' : 'var(--ab-warn)' } }, acct.verify ? '要验证：' + (acct.reason || '') : acct.needLogin ? '还没登录' : acct.isLogin ? '已登录：' + (acct.nickname || acct.secUid || '') : (acct.reason || acct.error || '未知')) : h('span', { className: 'ab-small ab-muted' }, '未检查')),
-              qrBox(brLogin, '浏览器'))),
-          h(Row, { label: 'IM 登录', hint: '私信 / 分享 / 回主人私信需要 IM 登录；二维码在本面板；会话在本机 data/douyin/im' },
-            h('div', null,
-              h('div', { className: 'ab-flex' },
-                h(Btn, { small: true, onClick: startImQrLogin, disabled: !!busy }, busy === 'imlogin' ? '正在获取二维码…' : '开始 IM 登录'),
-                h(Btn, { small: true, onClick: refreshImQrLogin, disabled: !!busy }, '刷新二维码'),
-                h(Btn, { small: true, onClick: async () => { const r = await get('/douyin/im'); setS({ ...(s || {}), im: r }); const st = await get('/douyin/im-login/status'); setImLogin(st) } }, '检查'),
-                im ? h('span', { className: 'ab-small', style: { color: im.loggedIn ? 'var(--ab-ok)' : 'var(--ab-warn)' } }, im.loggedIn ? ('已登录：' + (im.nickname || im.uid || '')) : (im.reason || '还没登录 IM')) : h('span', { className: 'ab-small ab-muted' }, '未检查')),
-              qrBox(imLogin, 'IM'),
-              imLogin && (imLogin.phase === 'sms_required' || imLogin.phase === 'voice_required') ? h('div', { className: 'ab-flex', style: { marginTop: 8 } },
-                h('input', {
-                  className: 'ab-input',
-                  value: smsCode,
-                  placeholder: imLogin.phase === 'voice_required' ? '语音验证码' : '短信验证码',
-                  onChange: (e) => setSmsCode(e.target.value),
-                  style: { maxWidth: 160 },
-                }),
-                h(Btn, { small: true, kind: 'primary', onClick: submitImSms, disabled: !!busy || !smsCode.trim() }, busy === 'imsms' ? '提交中…' : '提交验证码'),
-              ) : null)),
+                h(Btn, { small: true, kind: 'primary', onClick: startLogin, disabled: !!busy || !!login }, busy === 'login' ? '正在打开浏览器…' : login ? '等你扫码…' : '扫码登录'),
+                h(Btn, { small: true, onClick: async () => { setBusy('check'); const r = await get('/douyin/account'); setBusy(''); setS({ ...(s || {}), account: r }) }, disabled: !!busy }, busy === 'check' ? '检查中…' : '检查登录'),
+                acctText),
+              login ? h('div', { style: { marginTop: 10, display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' } },
+                login.shot ? h('img', { src: login.shot, alt: '抖音登录', style: { maxWidth: 360, width: '100%', borderRadius: 10, border: '1px solid var(--ab-line)', background: '#fff' } }) : h('div', { className: 'ab-muted ab-small' }, '二维码还没出来，稍等…'),
+                h('div', { className: 'ab-small', style: { flex: 1, minWidth: 160 } },
+                  h('div', null, login.message || '用抖音 App 扫码'),
+                  h('div', { className: 'ab-flex', style: { marginTop: 8 } },
+                    h(Btn, { small: true, onClick: act('/douyin/window', 'win', { visible: true }) }, '显示浏览器窗口'),
+                    h(Btn, { small: true, onClick: () => setLogin(null) }, '先不登了')))) : null)),
+          h(Row, { label: '浏览器窗口', hint: '遇到验证码、扫码后要短信验证时，挪到屏幕上处理' },
+            h('div', { className: 'ab-flex' },
+              h(Btn, { small: true, onClick: act('/douyin/window', 'win', { visible: true }), disabled: !!busy }, '显示浏览器窗口'),
+              h(Btn, { small: true, onClick: act('/douyin/window', 'win', { visible: false }), disabled: !!busy }, '收起窗口'))),
+          h(Row, { label: '浏览器路径', hint: '留空 = 自动找 Edge（找不到再找 Chrome / Chromium）' }, f.text('douyin.browserPath', { size: 'wide', placeholder: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe' })),
         ),
-        h(Card, { title: '主人抖音', desc: '填你的抖音号或主页链接，点「核对」后她才认你（只认 sec_uid，不认昵称）。改了输入要重新核对。' },
+        h(Card, { title: '主人抖音号', desc: '填你的抖音号或主页链接，点「核对」。核对过之后，她刷到特别想让你看的视频，会在评论里真的 @你（用抖音自己的 @ 选人，按你的账号 id 认人，你会收到抖音通知；认不出你就不发，不会发假 @）。改了输入要重新核对。' },
           h(Row, { label: '你的抖音号 / 主页链接' }, f.text('douyin.owner.input', { size: 'wide', placeholder: '抖音号，或 https://www.douyin.com/user/…' })),
           h('div', { className: 'ab-flex', style: { marginTop: 4 } },
-            h(Btn, { small: true, kind: 'primary', onClick: act('/douyin/confirm-owner', 'confirm', { input: owner.input }), disabled: !!busy }, busy === 'confirm' ? '核对中…' : '核对'),
-            s && s.ownerConfirmed ? h('span', { className: 'ab-small', style: { color: 'var(--ab-ok)' } }, '已核对：' + (s.owner && (s.owner.nickname || s.owner.secUid) || '')) : h('span', { className: 'ab-small ab-muted' }, '还没核对')),
+            h(Btn, { small: true, kind: 'primary', onClick: act('/douyin/confirm-owner', 'confirm', { input: ((draft.douyin || {}).owner || {}).input || '' }), disabled: !!busy }, busy === 'confirm' ? '核对中…' : '核对'),
+            s && s.owner ? h('span', { className: 'ab-small', style: { color: 'var(--ab-ok)' } }, '已核对：' + s.owner.nickname) : h('span', { className: 'ab-small ab-muted' }, '还没核对（不核对就不会 @你）')),
         ),
-        h(Card, { title: '怎么刷', desc: '只在「主动搭话」里设的醒着时间内刷。' },
+        h(Card, { title: '抖音私信', desc: '你在抖音上私信她，她会用自己的口气回（只认上面核对过的你，别人的私信不理）。让她找视频的话，她会去刷一轮再私信分享给你。只在「主动搭话」里设的醒着时间内回。' },
+          h(Row, { label: '回你的抖音私信' }, f.sw('douyin.ownerDm')),
+          h(Row, { label: '多久看一次' }, f.num('douyin.dmPollMinutes', { min: 1, max: 60 }), h('span', { className: 'ab-muted' }, '分钟'), h(Btn, { small: true, onClick: act('/douyin/dms', 'dms'), disabled: !!busy }, busy === 'dms' ? '正在看…' : '现在看一次')),
+        ),
+        h(Card, { title: '怎么刷', desc: '只在「主动搭话」里设的醒着时间内自己刷。主人在 QQ 里让她「去刷会儿抖音」也行。' },
           h(Row, { label: '定时自己去刷' }, f.sw('douyin.autoBrowse')),
           h(Row, { label: '多久刷一轮' }, f.range('douyin.intervalHours', 1, 24, 1, (v) => v + ' 小时')),
           h(Row, { label: '每天最多刷' }, f.range('douyin.maxRunsPerDay', 0, 12, 1, (v) => v + ' 轮')),
           h(Row, { label: '一轮看几个' }, f.range('douyin.perRun', 1, 10, 1, (v) => v + ' 个')),
           h(Row, { label: '每天最多看' }, f.num('douyin.maxWatchPerDay', { min: 0, max: 200 }), h('span', { className: 'ab-muted' }, '个（含手动）')),
-          h(Row, { label: '每个视频停留' }, f.num('douyin.dwellMin', { min: 3 }), h('span', { className: 'ab-muted' }, '～'), f.num('douyin.dwellMax', { min: 3 }), h('span', { className: 'ab-muted' }, '秒')),
+          h(Row, { label: '每个视频停留', hint: '真的在播放；停得越短越不像真人' }, f.num('douyin.dwellMin', { min: 3 }), h('span', { className: 'ab-muted' }, '～'), f.num('douyin.dwellMax', { min: 3 }), h('span', { className: 'ab-muted' }, '秒')),
+          h(Row, { label: '分享到哪', hint: '抖音私信要先在上面核对你的抖音号；没核对或者发不出去时会改发 QQ' }, f.choices('douyin.shareTo', [
+            { value: 'douyin', label: '抖音私信', desc: '在抖音里把视频分享给你（只有视频卡片）' },
+            { value: 'qq', label: 'QQ 私聊', desc: '她的话 + 视频链接' },
+            { value: 'both', label: '两边都发', desc: '抖音里收视频卡片，QQ 上看她说了什么' },
+          ])),
+          h(Row, { label: '分享给你', hint: '刷到好看的视频，分享给你的积极程度' }, f.choices('douyin.shareBias', [
+            { value: 'proactive', label: '积极', desc: '好看有趣就分享' },
+            { value: 'normal', label: '适中', desc: '觉得你会喜欢才分享' },
+            { value: 'stingy', label: '少分享', desc: '拿不准就不发' },
+          ])),
         ),
-        h(Card, { title: '每天上限', desc: '各项操作的日上限。权限在「权限」页单独设（默认仅主人）。试运行开着时只记日志不真动。' },
+        h(Card, { title: '每天上限', desc: '刚登录的号前几天上限自动减半（新号猛点赞最容易被风控）。遇到验证码 / 操作频繁当天就停手，看还能看。试运行开着时只记日志不真点。权限在「权限」页单独设（默认仅主人）。' },
           h(Row, { label: '点赞' }, f.num('douyin.caps.like', { min: 0, max: 300 })),
           h(Row, { label: '评论' }, f.num('douyin.caps.comment', { min: 0, max: 30 })),
-          h(Row, { label: '回评论' }, f.num('douyin.caps.replyComment', { min: 0, max: 60 })),
-          h(Row, { label: '关注（仅工具）', hint: '刷流不自动关注' }, f.num('douyin.caps.follow', { min: 0, max: 50 })),
-          h(Row, { label: '每天写操作合计', hint: '点赞/评论/关注/私信等合计；登录后前 3 天减半' }, f.num('douyin.gate.maxWritesPerDay', { min: 1, max: 500 })),
-          h(Row, { label: '两次写操作间隔', hint: '秒' }, f.num('douyin.gate.minWriteGapSec', { min: 0, max: 600 })),
-          h(Row, { label: '私信任何人', hint: '建议用小号' }, f.num('douyin.caps.dm', { min: 0, max: 30 })),
-          h(Row, { label: '分享给你' }, f.num('douyin.caps.shareOwner', { min: 0, max: 30 })),
-          h(Row, { label: '回你的私信' }, f.num('douyin.caps.dmReply', { min: 0, max: 200 })),
-          h(Row, { label: '改签名' }, f.num('douyin.caps.sign', { min: 0, max: 20 })),
-          h(Row, { label: '改昵称' }, f.num('douyin.caps.nickname', { min: 0, max: 20 })),
-          h(Row, { label: '换头像' }, f.num('douyin.caps.avatar', { min: 0, max: 10 })),
-          h(Row, { label: '看私信间隔' }, f.num('douyin.dmPollMinutes', { min: 2 }), h('span', { className: 'ab-muted' }, '分钟')),
-          h(Row, { label: '看回评论间隔' }, f.num('douyin.replyPollMinutes', { min: 5 }), h('span', { className: 'ab-muted' }, '分钟')),
+          h(Row, { label: '分享给你' }, f.num('douyin.caps.share', { min: 0, max: 30 })),
+          h(Row, { label: '评论里 @你', hint: '也算在评论次数里' }, f.num('douyin.caps.atOwner', { min: 0, max: 30 })),
+          h(Row, { label: '点赞 + 评论合计' }, f.num('douyin.gate.maxWritesPerDay', { min: 1, max: 500 })),
+          h(Row, { label: '两次点赞 / 评论间隔' }, f.num('douyin.gate.minWriteGapSec', { min: 0, max: 600 }), h('span', { className: 'ab-muted' }, '秒')),
+          h(Row, { label: '新号减半' }, f.num('douyin.gate.newAccountDays', { min: 0, max: 30 }), h('span', { className: 'ab-muted' }, '天')),
         ),
         h(Card, { title: '她刷过什么', right: h('div', { className: 'ab-flex' },
-          h(Btn, { small: true, onClick: act('/douyin/dms', 'dms'), disabled: !!busy }, busy === 'dms' ? '正在看…' : '看看主人私信'),
-          h(Btn, { small: true, onClick: act('/douyin/replies', 'replies'), disabled: !!busy }, busy === 'replies' ? '正在看…' : '看看回评论'),
-          h(Btn, { small: true, kind: 'primary', onClick: act('/douyin/run', 'run'), disabled: !!busy }, busy === 'run' ? h(Fragment, null, h('i', { className: 'ab-spin' }), ' 正在刷…') : '现在刷一轮')) },
-          s && s.pauseReason ? h('div', { className: 'ab-note warn', style: { marginBottom: 8 } }, '今天先不动手了：' + s.pauseReason + '（明天自动恢复；要验证请看上方登录区的面板提示）') : null,
+          h(Btn, { small: true, onClick: load }, '刷新'),
+          h(Btn, { small: true, kind: 'primary', onClick: act('/douyin/run', 'run'), disabled: !!busy || Boolean(s && s.busy) }, s && s.busy ? h(Fragment, null, h('i', { className: 'ab-spin' }), ' 正在刷…') : '现在刷一轮')) },
+          s && s.pauseReason ? h('div', { className: 'ab-note warn', style: { marginBottom: 8 } }, '今天先不点赞评论了：' + s.pauseReason + '。要验证的话点上面「显示浏览器窗口」处理，明天自动恢复。') : null,
           s ? h('div', { className: 'ab-muted ab-small', style: { marginBottom: 8 } },
-            '今天自动刷了 ' + s.runs + ' 轮 · 看了 ' + s.watched + ' · 赞 ' + s.like + ' · 评 ' + s.comment + ' · 关 ' + s.follow + ' · 私信 ' + s.dm + ' · 分享 ' + s.shareOwner + ' · 回你 ' + s.dmReply + ' · 签名 ' + (s.sign || 0) + ' · 昵称 ' + (s.nickname || 0) + ' · 头像 ' + (s.avatar || 0) +
+            '今天自动刷了 ' + s.runs + ' 轮 · 看了 ' + s.watched + ' · 赞 ' + s.like + '/' + caps.like + ' · 评 ' + s.comment + '/' + caps.comment + ' · 分享 ' + s.share + '/' + caps.share + (s.atOwner ? ' · @你 ' + s.atOwner + '/' + caps.atOwner : '') +
+            (s.newAccount ? '（新号，上限减半）' : '') +
             (s.lastRun ? ' · 上次 ' + timeAgo(s.lastRun) : '') +
-            (s.nextDueAt ? ' · 下次 ' + timeAgo(s.nextDueAt) : '') +
-            (s.lastSkipReason ? ' · 上次跳过：' + s.lastSkipReason : '') +
-            '（手动刷不占轮数）') : null,
-          s && (s.lastSignText || s.lastNicknameText) ? h('div', { className: 'ab-muted ab-small', style: { marginBottom: 8 } },
-            (s.lastSignText ? '最近签名：' + s.lastSignText : '') +
-            (s.lastSignText && s.lastNicknameText ? ' · ' : '') +
-            (s.lastNicknameText ? '最近昵称：' + s.lastNicknameText : '')) : null,
-          !s ? h(Empty, { icon: '⏳', text: '加载中…' }) : s.history.length === 0 ? h(Empty, { icon: '📱', text: '还没刷过。先登录，再点「现在刷一轮」。' }) :
+            (s.lastSkipReason ? ' · 上次没刷成：' + s.lastSkipReason : '')) : null,
+          !s ? h(Empty, { icon: '⏳', text: '加载中…' }) : s.history.length === 0 ? h(Empty, { icon: '📱', text: '还没刷过。先扫码登录、打开开关，再点「现在刷一轮」。' }) :
             h('div', { className: 'ab-list' }, s.history.map((x, i) => h('div', { key: i, className: 'ab-li' },
               h('div', { className: 'meta' }, timeAgo(x.at), h('br'), DOUYIN_KIND[x.kind] || x.kind),
-              h('div', { className: 'body' }, x.awemeId ? h('a', { href: 'https://www.douyin.com/video/' + x.awemeId, target: '_blank', rel: 'noreferrer' }, x.author ? x.author + ' 的视频' : x.awemeId) : h('b', null, x.author || x.secUid || ''), x.text ? h('div', { className: 'ab-muted' }, x.text) : null)))),
+              h('div', { className: 'body' },
+                x.awemeId ? h('a', { href: 'https://www.douyin.com/video/' + x.awemeId, target: '_blank', rel: 'noreferrer' }, x.title || (x.author ? x.author + ' 的视频' : x.awemeId)) : null,
+                x.author && x.title ? h('span', { className: 'ab-muted' }, ' · ' + x.author) : null,
+                x.text ? h('div', { className: 'ab-muted' }, (x.atOwner ? '@你 ' : '') + (x.via ? '（' + x.via.map((w) => (w === 'douyin' ? '抖音私信' : 'QQ')).join(' + ') + '）' : '') + x.text) : null)))),
         ),
       )
     }
@@ -2404,7 +2344,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     }
 
     // ---------------- 首次使用向导 ----------------
-    const WIZ_STEPS = ['你们的 QQ 号', '准备 SnowLuma', '启动并同意协议', '接入机器人号', '完成']
+    const WIZ_STEPS = ['你们的 QQ 号', '接 QQ 网关', '启动并同意协议', '连上机器人号', '完成']
 
     function Wizard({ st, draft, setDraft, save, toast, reload, onClose }) {
       const [step, setStep] = useState(() => { try { return Number(localStorage.getItem('aurabot.wiz') || 0) } catch (e) { return 0 } })
@@ -2416,7 +2356,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [procs, setProcs] = useState(null)
       const [live, setLive] = useState('dry')
       const qqOk = /^\d{5,11}$/.test(draft.botQQ || '') && /^\d{5,11}$/.test(draft.ownerQQ || '') && draft.botQQ !== draft.ownerQQ
-      const canNext = [qqOk, sl.installed, sl.running && sl.consented, conn && login && login.uin === st.config.botQQ, true][step]
+      const external = draft.gateway === 'onebot'
+      const canNext = [qqOk, external ? Boolean(draft.snowluma.wsUrl || st.config.snowluma.wsUrl) : sl.installed, external || (sl.running && sl.consented), conn && login && login.uin === st.config.botQQ, true][step]
       const next = async () => {
         if (step === 0 || step === 1) await save({ ...draft, enabled: true })
         if (step === 3) {} // 已连上
@@ -2431,16 +2372,22 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Row, { label: '你的 QQ 号（主人）', hint: '群管、操作电脑这些只听主人的' }, f.text('ownerQQ', { placeholder: '你的大号' })),
           h(Row, { label: '她怎么称呼你' }, f.text('ownerName', { placeholder: '主人' })),
           draft.botQQ && draft.ownerQQ && draft.botQQ === draft.ownerQQ ? h('div', { className: 'ab-note err' }, '机器人号和主人号不能是同一个。') : null),
-        // 1. SnowLuma
+        // 1. SnowLuma，或接已有的 OneBot 机器人
+        external ? h('div', null,
+          h(GatewayChoice, { draft, setDraft }),
+          h('p', { className: 'ab-desc', style: { marginTop: 10 } }, '让你的 OneBot 服务（NapCat、LLOneBot、Lagrange、Docker 里的 SnowLuma……）登录机器人号，把它的正向 WebSocket 地址填在下面。插件只连接，不会启动或注入任何东西。'),
+          h(OneBotFields, { draft, f })) :
         h('div', null,
-          h('p', { className: 'ab-desc' }, 'SnowLuma 是让机器人号上线的 QQ 网关。它的协议不允许别的程序自动下载安装，所以这一步要你自己来（只用做一次）。'),
+          h(GatewayChoice, { draft, setDraft }),
+          h('p', { className: 'ab-desc', style: { marginTop: 10 } }, 'SnowLuma 是让机器人号上线的 QQ 网关。它的协议不允许别的程序自动下载安装，所以这一步要你自己来（只用做一次）。'),
           h('div', { className: 'ab-steps' },
             h('div', { className: 'ab-step' }, h('div', null, h('b', null, '下载'), h('div', { className: 'ab-muted ab-small' }, '下载 Windows 完整版，文件名类似 SnowLuma-v2.x.x-win-x64.zip（不带 lite）。'),
               h('div', { style: { marginTop: 6 } }, h(Btn, { small: true, onClick: () => window.open(sl.downloadPage, '_blank') }, '打开下载页 ↗')))),
             h('div', { className: cx('ab-step', sl.installed && 'done') }, h('div', null, h('b', null, '解压到纯英文目录'), h('div', { className: 'ab-muted ab-small' }, '推荐 C:\\Aurabot\\snowluma，解压后目录里能直接看到 index.mjs。'),
               h('div', { className: 'ab-flex', style: { marginTop: 6 } }, f.text('snowluma.dir', { size: 'wide', placeholder: 'C:\\Aurabot\\snowluma' }), h(Btn, { small: true, onClick: async () => { await save(draft); reload() } }, '检查')),
               h('div', { className: 'ab-small', style: { marginTop: 4, color: sl.installed ? 'var(--ab-ok)' : 'var(--ab-warn)' } }, sl.installed ? '✓ 找到了 SnowLuma v' + sl.version : sl.reason))))),
-        // 2. 启动 + 协议
+        // 2. 启动 + 协议（接自己的 OneBot 时不用）
+        external ? h('div', null, h('p', { className: 'ab-desc' }, '用的是你自己的 OneBot 服务，这一步不用做，直接下一步。')) :
         h('div', null,
           h('p', { className: 'ab-desc' }, '点启动后它在后台运行（不弹窗口），控制台密码由插件自动生成和保存，你不用记。'),
           h('div', { className: 'ab-flex', style: { marginBottom: 10 } },
@@ -2449,7 +2396,11 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Agreement, { running: sl.running, toast, onChange: reload })),
         // 3. 接入
         h('div', null,
+          external ? h('p', { className: 'ab-desc' }, '确认你的 OneBot 服务登录的是机器人号 ' + (st.config.botQQ || '') + '，然后点「测试连接」。插件连上后会先核对登录的号，不是机器人号就断开。') :
           h('p', { className: 'ab-desc' }, '在这台电脑上另开一个 QQ，登录机器人号 ' + (st.config.botQQ || '') + '（可以最小化）。你的大号 QQ 照常开着就行——插件只会接入机器人号，绝不碰别的号。'),
+          external ? h('div', { className: 'ab-flex' },
+            h(Btn, { kind: 'primary', small: true, onClick: async () => { const r = await post('/onebot/reconnect'); toast(r.message, r.ok ? 'ok' : 'err'); reload() } }, '连接'),
+            h(Btn, { small: true, onClick: async () => { const r = await get('/onebot/test'); toast(r.message) } }, '测试连接')) :
           h('div', { className: 'ab-flex' },
             h(Btn, { kind: 'primary', small: true, onClick: async () => { const r = await post('/snowluma/attach'); toast(r.message); setTimeout(reload, 1500) } }, '接入机器人号'),
             h(Btn, { small: true, onClick: async () => { const r = await get('/snowluma/processes'); setProcs(r.list || []); if (!r.ok) toast(r.message) } }, '看看有哪些 QQ 进程'),

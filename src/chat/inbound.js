@@ -28,7 +28,7 @@ export function isStickerSegment(seg) {
  *   mentioned: boolean, replyId: string, images: object[], stickers: object[], records: object[],
  * }}
  */
-export function parseMessageEvent(event, selfId) {
+export function parseMessageEvent(event, selfId, { faceName } = {}) {
   const self = String(selfId || event.self_id || '')
   const kind = event.message_type === 'group' ? 'group' : 'private'
   const userId = String(event.user_id ?? event.sender?.user_id ?? '')
@@ -54,9 +54,12 @@ export function parseMessageEvent(event, selfId) {
       case 'reply':
         replyId = String(d.id ?? '')
         break
-      case 'face':
-        texts.push(d.raw?.faceText || '[表情]')
+      case 'face': {
+        // QQ 系统表情按名字给她看（「[捂脸]」），认不出才写「[表情]」
+        const name = faceName?.(d.id)
+        texts.push(name ? `[${name}]` : d.raw?.faceText || '[表情]')
         break
+      }
       case 'image':
       case 'mface':
         if (isStickerSegment(seg)) {

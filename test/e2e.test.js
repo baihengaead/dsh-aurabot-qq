@@ -223,8 +223,8 @@ test('QQ 命令：主人 /silent 后群里 @ 她也不回，/active 恢复；群
   mock.push(grp('555', '777', text('/silent')))
   await sleep(500)
   mock.push(grp('555', OWNER, text('/silent'), 'xiaoming'))
-  await until(() => sentTo('group', '555').length > n)
-  assert.match(JSON.stringify(sentTo('group', '555').at(-1)), /不说话/)
+  // 群友那句会交给模型，回复可能晚到、排在后面，所以等「不说话」那条出现，别只看最后一条
+  await until(() => sentTo('group', '555').slice(n).some((m) => /不说话/.test(JSON.stringify(m))))
   const turns = fake.turns.length
   n = sentTo('group', '555').length
   mock.push(grp('555', '778', at('在吗')))

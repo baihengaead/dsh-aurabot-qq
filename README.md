@@ -13,23 +13,38 @@ QQ ⇄ SnowLuma（OneBot v11，你自己安装）⇄ Aurabot 插件 ⇄ DSH 会�
 
 ## 安装
 
-需要：Windows、DeepSeek Harness 桌面版、一个用来当机器人的 QQ 小号。
+需要：DeepSeek Harness、一个用来当机器人的 QQ 小号，以及一个让机器人号上线的 QQ 网关：Windows 上用插件帮你管的 SnowLuma 最省事；Linux / Docker 或者已经有 QQ 机器人的，接你自己的 OneBot v11 服务就行（见下面）。
+
+Windows 桌面版：
 
 ```powershell
 & "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add github:accomplish07zrh-eng/dsh-aurabot-qq
 ```
 
+Linux / Docker：用 DSH 自己的命令行（把 `<profile>` 换成你在用的 profile；在容器里就进容器执行）：
+
+```bash
+dsh plugin --profile <profile> add github:accomplish07zrh-eng/dsh-aurabot-qq
+```
+
 装好后重启 DSH，打开左侧栏「自动化任务」下的 **Aurabot**，跟着设置向导走：
 
 1. 填机器人 QQ 号（用小号）和你的 QQ 号
-2. 自己下载并解压 [SnowLuma](https://github.com/SnowLuma/SnowLuma/releases)
-3. 启动，在面板里同意 SnowLuma 的协议（控制台密码自动生成）
-4. 登录机器人号，点「接入机器人号」
-5. 先试运行，或直接上线
+2. 选 QQ 网关：
+   - **用 SnowLuma**（Windows）：自己下载并解压 [SnowLuma](https://github.com/SnowLuma/SnowLuma/releases)，启动，在面板里同意它的协议（控制台密码自动生成），登录机器人号后点「接入机器人号」
+   - **接我已有的 OneBot 机器人**：NapCat、LLOneBot、Lagrange、Docker 里的 SnowLuma 等任何 OneBot v11 实现都行。让它登录机器人号，把正向 WebSocket 地址（和 token，有的话）填进向导；HTTP 地址可选。插件只连接，不启动、不注入任何东西，连上后先核对登录的是不是机器人号
+3. 先试运行，或直接上线
+
+### Linux / Docker 上要知道的
+
+- **语音**：edge-tts 装在插件自己的 Python 虚拟环境里，要有能建虚拟环境的 Python（Debian / Ubuntu 装 `python3-venv`），或者装了 [uv](https://docs.astral.sh/uv/)。Windows 自带语音这个兜底在 Linux 上没有。
+- **刷抖音**：需要 Chrome / Chromium / Edge，而且不能用无头模式（抖音会拦）。没有桌面的服务器上用 Xvfb 之类的虚拟显示跑，比如 `xvfb-run` 启动 DSH，或在容器里起一个 Xvfb 再设 `DISPLAY`。浏览器路径可以在面板里填，也可以设环境变量 `CHROME_PATH`。
+- **翻唱（RVC）**：目前只支持 Windows。
+- 容器里的 DSH 连宿主机或别的容器上的 OneBot 服务时，地址要用容器能访问到的主机名 / 端口（不是 `127.0.0.1`）。
 
 ## 升级
 
-在 PowerShell 里运行下面这行（拉取 GitHub 上的最新版），然后重启 DSH。设置、人格、记忆都会保留；有新版本时面板里也会提示。
+再跑一遍上面的安装命令（拉取 GitHub 上的最新版），然后重启 DSH。设置、人格、记忆都会保留；有新版本时面板里也会提示。Windows 桌面版：
 
 ```powershell
 & "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add github:accomplish07zrh-eng/dsh-aurabot-qq
@@ -45,17 +60,17 @@ QQ ⇄ SnowLuma（OneBot v11，你自己安装）⇄ Aurabot 插件 ⇄ DSH 会�
 | 记忆 | 本地索引记忆库（中文二元切词 + BM25，再按「关于当前说话人」「重要程度」和遗忘曲线加权，越常被想起的忘得越慢）。来源：她自己记的、每天两次从聊天和空间动态里整理出来的、她自己的经历（唱了什么、评论了谁）、空间日记、你手动加的。整理时新事实先和旧记忆比对：补充旧的就合并，说明旧的过时了就把旧的标成「已过时」（不删，能恢复）。每个人有一张常驻的「人物小档案」，每个人 / 群还有「相处经验」和「说话方式」。想起的记忆带时间；对方只说「嗯嗯」时连上一句一起想；面板能看到最近几轮想起了哪几条；可以导入旧档案。 |
 | 心情 | 默认按关键词，可选每轮用模型判一次（有把握才算，分得清她主动找人时的心意）；被夸、被凶会推动心情，按半衰期回到平常；心情明显时每轮告诉她该怎么说话，并实际影响发表情 / 语音的概率、回复快慢、插话积极程度。 |
 | B 站 | 定时从她的兴趣、记忆里主人喜欢的东西和面板关键词里挑方向搜视频（WBI 签名），读简介、字幕和热评，再按人格决定评论 / 私聊分享给主人 / 记住什么；定时看别人回她的评论并接着回。主人在 QQ 里发 B 站链接或分享卡片，她用 `bili_watch` 看完再聊。看过、评过、回过的都记成她的经历。不碰关注、私信。 |
-| 刷抖音 | 内容用专用 Edge（独立 `edge-profile` + CDP）刷推荐；社交走 douyin-im。浏览器与 IM **均在面板内显示登录二维码并轮询状态**（Edge 离屏不抢前台；短信/滑块在面板提示）。点赞 / 评论 / 回评论 / 私信 / 分享到主人抖音 / 回主人私信；关注仅工具（`douyin_follow`）。写操作总闸与试运行不计次见面板 / CHANGELOG。被动截获页面 feed，不签 a_bogus。8 项权限默认仅主人；总开关默认关。私信提示「建议用小号」。 |
+| 刷抖音 | 专用浏览器（独立的登录资料目录，Edge / Chrome / Chromium，经 CDP 控制，窗口放在屏幕外）。数据都走抖音网页自己的接口（在页面里 fetch，签名由页面脚本自动加，不自己算 a_bogus），不读屏：标题、分类、抖音给的内容摘要和分段、热评。一个个点开看（真的播放、停留），再按人格决定点赞 / 评论 / 分享给主人（抖音私信分享视频卡片、QQ 私聊发她的话 + 链接，或两边都发）/ 记住什么；特别想让主人看的，会在评论里真·@主人（用抖音自己的 @ 选人，按 sec_uid 认人，认不出就不发）。点赞 / 评论在弹层播放器里按视频 id 找按钮，点完等接口回应才算成功；页面看不见（锁屏）时用页面内事件。扫一次码登录（面板里显示登录弹窗截图）。打开面板不启动浏览器；验证码每次现查，遇到就当天停手。每天上限、两次操作间隔、新号前几天减半；4 项权限默认仅主人；总开关默认关。主人在抖音私信她，她会回（只认核对过的主人）；评论被抖音要求身份验证拦下时能认出来。 |
 | 改资料 | 听人的话改她自己的 QQ 昵称 / 签名 / 头像（`qq_set_nickname` / `qq_set_signature` / `qq_set_avatar`，走 SnowLuma 扩展动作），以及 B 站签名 / 头像（`bili_set_sign` 最多 70 字；`bili_set_avatar` 收图片网址或 `last`=刚才发的那张图，最大 2MB，走 `x/member/web/face/update`）。面板「权限」页每个操作单独设 关 / 仅主人私聊（默认）/ 所有人；执行前按最新设置再查一遍，试运行只回话不真改。 |
 | 按聊天选模型 | 主人可以让不同聊天用不同模型。面板「模型」页的「按聊天选模型」：两个下拉框选「私聊默认模型」「群聊默认模型」，要给某个 QQ / 某个群单独指定，展开下面的小列表添加一行（再点「移除」删掉）。优先级：这个私聊（QQ 号）> 这个群（群号）> 所有私聊 / 所有群默认 > 全局模型（「聊天用的模型」或 DSH 默认）；没选或选的模型在 DSH 里找不到，就自动用下一级。存在 `config.json` 的 `chatModels`（`privateDefault`、`groupDefault`、`privates`、`groups`，每项 `{ provider, model, reasoningEffort? }`），重启不丢，换了从那个聊天的下一条消息起生效。只有主人能改，聊天里的人说什么都换不了；扩展模块的 `model` 挂钩仍在这之后运行。 |
 | 模块 | 除了核心（配置、QQ 网关、聊天中枢、人格、权限、面板），每项本事都是模块（`src/modules/`）。内核（`src/core/modules.js`）负责开关、替换、热重载和出错隔离：模块注册的工具、上下文、规则、命令、事件、定时任务、接口都记在它名下，停下时一起撤掉；聊天中枢用到表情、语音、心情、记忆时，找的都是当时在跑的那个模块。用户模块放在数据目录 `modules/`（升级不碰），和内置模块同名就是替换。扩展接口版本化，说明见 `src/modules/API.md`、类型见 `src/modules/aurabot.d.ts`（每次启动复制到 `modules/`）。聊天主流程留了改写挂钩：群聊决定、提示词、回复拆条、最终发送、模型选择、人格和规则。自己写的模块按快照加载（多文件、npm 依赖都能热重载），面板「扩展」页有模拟测试（截获发送，不真发）。 |
 | 本地接口 | 语音合成、生图、翻唱换声、语音识别都能换成自己电脑上的模型或服务：面板生成带示例的脚本（放在数据目录 local/，升级不覆盖、改完即生效），也可以「复制给 DSH 的话」让 DSH 照接口说明帮你改。 |
 | QQ 命令 | 主人在 QQ 里直接发 `/silent` `/active` `/quiet` `/chatty` `/model` `/sing` `/remember` `/status` 等管她，总开关关着也能用。 |
 | 工具 | 由各模块提供，按会话注册（`agent.ctx.tools.register`），只出现在 Aurabot 的会话里。群管在工具层校验这一轮有主人下令、对象不是主人、她在群里有管理权限；点歌、生图校验「这一轮说话的人全是主人」，不只靠人格约束。 |
-| QQ 网关 | SnowLuma 的 OneBot v11：WS 收事件（实时），HTTP 调接口。插件从 SnowLuma 配置文件自动读取端口和令牌。 |
+| QQ 网关 | OneBot v11：WS 收事件（实时），HTTP 调接口（没填 HTTP 就都走 WS）。用 SnowLuma 时插件从它的配置文件自动读取端口和令牌；接自己的 OneBot 机器人（`gateway: "onebot"`）时只连你填的地址，不启动、不注入任何东西。不管哪种，连上后都先用 `get_login_info` 核对登录的是不是机器人号。 |
 | SnowLuma 管理 | SnowLuma 的 EULA 第 5.4 条不允许「通过自动化脚本部署」，所以插件不下载，也不替你同意协议：协议全文显示在面板里，由你本人勾选同意。插件只启停你自己装好的那一份（后台运行，不弹窗口）；第一次启动时用 `SNOWLUMA_WEBUI_BOOTSTRAP_PASSWORD` 设一个自己生成的控制台密码。注入前用 `/api/processes` 核对每个 QQ 进程登录的号，只注入机器人号（SnowLuma 认不出号时，只在唯一一个认不出号的进程上注入，连上后用 `get_login_info` 核对，不是机器人号就断开并撤销）；`hookAutoLoad` 永远关。 |
-| 语音 | TTS 用 edge-tts（装在插件自己的 Python 虚拟环境里），也可以接本地的 CosyVoice、GPT-SoVITS，装不上时用 Windows 自带中文语音兜底。ASR 先用 QQ 自带的语音转文字（`fetch_ptt_text`），再试 DSH 的 `speechToText`。 |
-| 表情包 | 只收真正的表情（`sub_type=1`、mface、带 `emoji_id` 的），再过尺寸、宽高比、体积、MD5 去重、每小时限额几道关。收下后 `add_custom_face`，视觉模型起备注后 `modify_custom_face`。 |
+| 语音 | TTS 用 edge-tts（装在插件自己的 Python 虚拟环境里，Windows / Linux / macOS 都行），也可以接本地的 CosyVoice、GPT-SoVITS；Windows 上装不上时用 Windows 自带中文语音兜底。ASR 先用 QQ 自带的语音转文字（`fetch_ptt_text`），再试 DSH 的 `speechToText`。 |
+| 表情包 | 只收真正的表情（`sub_type=1`、mface、带 `emoji_id` 的），再过尺寸、宽高比、体积、MD5 去重、每小时限额几道关。收下后 `add_custom_face`，视觉模型起备注后 `modify_custom_face`。商城表情按商城表情原样发；面板里能改表情的名字和标签；关掉表情包后回复里写的表情也不发。 |
 | 空间 | 空间日记用 `send_qzone_msg`，在专用的后台会话里写，结合当天聊天流水。空间互动：定期看自己说说下的新评论和回复（按整串评论来回，一串只回一次），逛好友动态按概率点赞、评论；评论时结合说说内容和楼里已有的评论。 |
 | 翻唱 | 点歌（`qq_song_cover` 工具或 `/sing`）→ 网易云下载（weapi，可填 Cookie 下会员歌）→ 先截要发的那一段 → audio-separator 分离人声和伴奏 → Applio（RVC，固定版本）换成她的音色 → ffmpeg 混音 → 发语音条。插件不带音色，用户在面板里导入自己有权使用的 .pth / zip。一键安装不依赖电脑上的 Python / git / uv，可以选装到哪个盘，进度可见，下载走系统代理并能断点续传。 |
 

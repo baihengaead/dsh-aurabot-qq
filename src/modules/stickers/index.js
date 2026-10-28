@@ -21,7 +21,8 @@ export default {
       if (chat.kind === 'system') return []
       const current = chat.chatId
       const tools = [
-        defineTool({
+        // 表情包关着就不挂「发表情」（整理表情库的工具照样留着）
+        ...(api.config().stickers.enabled ? [defineTool({
           name: 'qq_send_sticker',
           description: '在当前 QQ 聊天里发一张表情包。name 写表情的名字或情绪（如「委屈」「开心」「早晚安」），会在表情库里模糊匹配。一般直接在回复里写 <sticker:名字> 就行，这个工具用于回复之外单独补发。',
           properties: { name: str('表情名字或情绪关键词') },
@@ -30,7 +31,7 @@ export default {
             const ok = await hub.sendSticker(current, String(name || ''))
             return ok ? { ok: true, message: '发了' } : { ok: false, message: '表情库里没找到合适的' }
           },
-        }),
+        })] : []),
         defineTool({
           name: 'qq_list_stickers',
           description: '看看表情库里有哪些表情（名字和标签），挑表情前可以先看。',

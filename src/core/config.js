@@ -20,9 +20,13 @@ export const DEFAULTS = {
   ownerQQ: '', // 主人 QQ 号（向导里填）
   ownerName: '主人',
   ownerLevel: 'full', // full | social | chat
-  profilePerms: { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', biliSign: 'owner', biliAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner', douyinBrowse: 'owner', douyinLike: 'owner', douyinComment: 'owner', douyinReplyComment: 'owner', douyinFollow: 'owner', douyinDm: 'owner', douyinShareOwner: 'owner', douyinReplyOwnerDm: 'owner', douyinSign: 'owner', douyinNickname: 'owner', douyinAvatar: 'owner' }, // 改资料类操作（含抖音浏览/互动/改资料）的权限：off 关 / owner 仅主人私聊 / all 所有人。抖音项默认仅主人，总开关默认关
+  profilePerms: { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', biliSign: 'owner', biliAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner', douyinBrowse: 'owner', douyinLike: 'owner', douyinComment: 'owner', douyinShareOwner: 'owner' }, // 改资料类操作（含抖音浏览 / 点赞 / 评论 / 分享）的权限：off 关 / owner 仅主人私聊 / all 所有人。抖音项默认仅主人，总开关默认关
   longTasks: false, // 长任务模式：主人私聊（完整权限）额外挂 dsh-tool-jobs + dsh-tool-schedule，会多一点工具定义、稍慢
   allow: { private: [], groups: [] }, // 主人永远能私聊，不用写进白名单
+  // 用什么接 QQ：snowluma = 插件帮你管 SnowLuma（Windows）；onebot = 接你已有的 OneBot v11 机器人（NapCat、LLOneBot、Lagrange、Docker 里的 SnowLuma……），
+  // 这时只按下面 snowluma.httpUrl / wsUrl / token 去连，不启动、不注入任何东西
+  gateway: 'snowluma',
+  workspaceDir: '', // QQ 会话放在哪个文件夹（DSH 里的「Aurabot · QQ」工作区）；留空 = 默认（用户目录下 Aurabot\\qq-chats）
   snowluma: {
     dir: 'C:\\Aurabot\\snowluma', // 主人自己下载解压到这里（EULA 不允许自动部署）
     autoStart: true, // 随 DSH 启动它（只启动主人已安装并同意过协议的副本）
@@ -90,6 +94,7 @@ export const DEFAULTS = {
   },
   stickers: {
     enabled: true,
+    faces: true, // 回复里能夹 QQ 自带的小黄脸（<face:名字>）
     autoChance: 0.35, // 文字回复自动配一张表情的概率
     collect: true, // 偷表情总开关
     collectMode: 'ask', // ask = 她挑（喜欢才收）；auto = 全都偷（看到就收）；owner = 只听主人的（主人让她收才收）
@@ -137,28 +142,27 @@ export const DEFAULTS = {
     shotChance: 0.35, // 刷完顺手发一张截图的概率（跟发一张表情包一个量级，0 = 从不）
     shotLibrary: 300, // 截图库最多存多少张，超了自动删最旧的
   },
-  // 刷抖音：用专用的 Edge 窗口（独立登录资料，不碰你平时的浏览器），经 CDP 控制。浏览/互动/改资料各项权限在 profilePerms.douyin*。
+  // 刷抖音：专用浏览器（独立登录资料，不碰你平时的浏览器），经 CDP 控制。浏览 / 点赞 / 评论 / 分享各项权限在 profilePerms.douyin*。
   douyin: {
-    enabled: false, // 总开关：默认关，先在面板里登录抖音再打开
+    enabled: false, // 总开关：默认关，先在面板里扫码登录再打开
     autoBrowse: true, // 定时自己去刷
     intervalHours: 4,
     maxRunsPerDay: 3,
     perRun: 5, // 一轮看几个视频
-    maxWatchPerDay: 30, // 每天最多看几个（手动让她刷也算）
+    maxWatchPerDay: 30, // 每天最多看几个（手动让她刷也算；主人亲口让她找视频时不受这个限制）
     dwellMin: 8, // 每个视频停留的秒数（随机取一个）
     dwellMax: 40,
-    browserPath: '', // 留空 = 自动找 Edge（找不到再找 Chrome）；也可填 msedge.exe 的完整路径
-    minimize: true, // 登录完把窗口最小化
-    dmPollMinutes: 7, // 看私信的频率（分钟，实际在 0.7~1.4 倍之间随机）
-    replyPollMinutes: 25, // 看别人回她评论的频率（分钟）
-    owner: { input: '', secUid: '', uid: '', nickname: '', avatar: '', confirmedInput: '' }, // 主人抖音；secUid/uid 由「核对」写入，面板不能直接改
-    socialInterruptBrowse: true, // 社交（私信/分享）进行中时打断刷流，原因写入 lastSkipReason
-    shareBias: 'proactive', // stingy|normal|proactive：刷流 think 里 share 的倾向（默认积极推给主人）
-    caps: { like: 30, comment: 3, replyComment: 6, follow: 5, dm: 5, shareOwner: 5, dmReply: 20, sign: 2, nickname: 2, avatar: 1 }, // 每天上限（登录后前 3 天减半；改资料三项仅工具）
+    browserPath: '', // 留空 = 自动找 Edge（找不到再找 Chrome / Chromium）；也可填完整路径
+    shareBias: 'proactive', // stingy | normal | proactive：刷到好看的视频，分享给主人的积极程度
+    ownerDm: true, // 主人在抖音上私信她时回（只认核对过的主人抖音号）
+    dmPollMinutes: 3, // 隔几分钟看一次主人的抖音私信
+    shareTo: 'douyin', // douyin = 在抖音里私信分享给主人（要先核对主人抖音号，没核对 / 发不出去就改发 QQ）| qq = QQ 私聊发链接 | both = 两边都发
+    owner: { input: '', secUid: '', uid: '', nickname: '', confirmedInput: '' }, // 主人的抖音号：面板填抖音号 / 主页链接，「核对」后才写入 secUid（真·@主人只认它）
+    caps: { like: 30, comment: 3, share: 5, atOwner: 3 }, // 每天上限（登录后前 newAccountDays 天减半）；atOwner = 评论里真·@主人
     gate: {
-      maxWritesPerDay: 60, // 所有写操作合计上限
-      minWriteGapSec: 20, // 任意两次写操作之间至少隔这么多秒
-      newAccountDays: 3, // 首次登录起这么多天内，单项上限和总写次数都减半
+      maxWritesPerDay: 40, // 点赞 + 评论合计上限
+      minWriteGapSec: 20, // 两次点赞 / 评论之间至少隔这么多秒
+      newAccountDays: 3, // 首次登录起这么多天内，上限都减半
     },
   },
   qzoneSocial: {
@@ -247,6 +251,10 @@ export function normalize(raw) {
   c.security.ssrfMode = c.security.ssrfMode === 'loose' ? 'loose' : 'strict'
   c.botQQ = qq(c.botQQ)
   c.ownerQQ = qq(c.ownerQQ)
+  c.gateway = c.gateway === 'onebot' ? 'onebot' : 'snowluma'
+  // 只认绝对路径（Windows 的 D:\\… 或 Linux 的 /…），别的当没填
+  c.workspaceDir = String(c.workspaceDir || '').trim()
+  if (c.workspaceDir && !/^([a-zA-Z]:[\\/]|\/)/.test(c.workspaceDir)) c.workspaceDir = ''
   // 视觉能力：auto = 问 DSH 的模型元数据；on / off = 主人手动声明（覆盖元数据）
   c.model.vision = c.model.vision === 'on' || c.model.vision === 'off' ? c.model.vision : 'auto'
   c.setupDone = bool(c.setupDone, false)
@@ -273,6 +281,7 @@ export function normalize(raw) {
   c.voice.autoChance = num(c.voice.autoChance, 0.15, 0, 1)
   c.voice.autoMaxChars = num(c.voice.autoMaxChars, 80, 1, 500)
   c.stickers.autoChance = num(c.stickers.autoChance, 0.35, 0, 1)
+  c.stickers.faces = c.stickers.faces !== false
   c.stickers.maxPerHour = num(c.stickers.maxPerHour, 20, 0, 200)
   c.stickers.maxLibrary = num(c.stickers.maxLibrary, 300, 20, 2000)
   c.stickers.maxSide = num(c.stickers.maxSide, 520, 80, 4096)
@@ -318,31 +327,26 @@ export function normalize(raw) {
   const d = c.douyin
   d.enabled = bool(d.enabled, false)
   d.autoBrowse = bool(d.autoBrowse, true)
-  d.minimize = bool(d.minimize, true)
-  d.socialInterruptBrowse = bool(d.socialInterruptBrowse, true)
   d.intervalHours = num(d.intervalHours, 4, 1, 48)
   d.maxRunsPerDay = num(d.maxRunsPerDay, 3, 0, 24)
   d.perRun = num(d.perRun, 5, 1, 10)
   d.maxWatchPerDay = num(d.maxWatchPerDay, 30, 0, 200)
   d.dwellMin = num(d.dwellMin, 8, 3, 120)
   d.dwellMax = Math.max(d.dwellMin, num(d.dwellMax, 40, 3, 300))
-  d.dmPollMinutes = num(d.dmPollMinutes, 7, 2, 120)
-  d.replyPollMinutes = num(d.replyPollMinutes, 25, 5, 240)
   d.browserPath = String(d.browserPath || '').trim()
-  if (!isObj(d.owner)) d.owner = {}
-  for (const k of ['input', 'secUid', 'uid', 'nickname', 'avatar', 'confirmedInput']) d.owner[k] = String(d.owner[k] ?? '').trim().slice(0, 400)
+  d.shareTo = ['douyin', 'qq', 'both'].includes(d.shareTo) ? d.shareTo : 'douyin'
+  d.ownerDm = bool(d.ownerDm, true)
+  d.dmPollMinutes = num(d.dmPollMinutes, 3, 1, 60)
+  d.shareBias = ['stingy', 'normal', 'proactive'].includes(d.shareBias) ? d.shareBias : d.shareBias === 'off' ? 'stingy' : 'proactive'
   if (!isObj(d.caps)) d.caps = {}
-  {
-    const rawBias = String(d.shareBias || 'proactive').toLowerCase()
-    d.shareBias = rawBias === 'off' || rawBias === 'stingy' ? 'stingy'
-      : rawBias === 'normal' ? 'normal'
-      : 'proactive'
-  }
-  for (const [k, dv, max] of [['like', 30, 300], ['comment', 3, 30], ['replyComment', 6, 60], ['follow', 5, 50], ['dm', 5, 30], ['shareOwner', 5, 30], ['dmReply', 20, 200], ['sign', 2, 20], ['nickname', 2, 20], ['avatar', 1, 10]]) d.caps[k] = num(d.caps[k], dv, 0, max)
+  if (raw?.douyin?.caps?.share == null && raw?.douyin?.caps?.shareOwner != null) d.caps.share = raw.douyin.caps.shareOwner // 1.0.x 叫 shareOwner
+  d.caps = { like: num(d.caps.like, 30, 0, 300), comment: num(d.caps.comment, 3, 0, 30), share: num(d.caps.share, 5, 0, 30), atOwner: num(d.caps.atOwner, 3, 0, 30) }
+  if (!isObj(d.owner)) d.owner = {}
+  d.owner = Object.fromEntries(['input', 'secUid', 'uid', 'nickname', 'confirmedInput'].map((k) => [k, String(d.owner[k] ?? '').trim().slice(0, 400)]))
   if (!isObj(d.gate)) d.gate = {}
-  d.gate.maxWritesPerDay = num(d.gate.maxWritesPerDay, 60, 1, 500)
-  d.gate.minWriteGapSec = num(d.gate.minWriteGapSec, 20, 0, 600)
-  d.gate.newAccountDays = num(d.gate.newAccountDays, 3, 0, 30)
+  d.gate = { maxWritesPerDay: num(d.gate.maxWritesPerDay, 40, 1, 500), minWriteGapSec: num(d.gate.minWriteGapSec, 20, 0, 600), newAccountDays: num(d.gate.newAccountDays, 3, 0, 30) }
+  // 1.0.x 的 douyin-im / 私信相关设置都不用了
+  for (const k of ['atOwnerOnLikeChance', 'minimize', 'socialInterruptBrowse', 'replyPollMinutes']) delete d[k]
   delete c.mood.maxInjectPerDay // 旧版的「每天最多提醒几次」，现在心情明显时每轮都会带上
   c.snowluma.webuiPort = num(c.snowluma.webuiPort, 5099, 1, 65535)
   // 老配置只有一个 consolidateAt：换成两个时间点（它 + 12 小时后）
@@ -527,10 +531,8 @@ export function mergeFromPanel(current, incoming) {
     delete p[`${k}Set`]
     delete p[`${k}Hint`]
   }
-  // 主人的抖音 secUid / 昵称 / 头像只能由「核对」路由写入，面板存配置时保留原值
-  if (!next.douyin) next.douyin = {}
-  if (!next.douyin.owner) next.douyin.owner = {}
-  for (const k of ['secUid', 'uid', 'nickname', 'avatar', 'confirmedInput']) next.douyin.owner[k] = current.douyin?.owner?.[k] ?? ''
+  // 主人的抖音 secUid / uid / 昵称只能由「核对」写入，面板存配置时保留原值
+  next.douyin.owner = { ...next.douyin.owner, ...Object.fromEntries(['secUid', 'uid', 'nickname', 'confirmedInput'].map((k) => [k, current.douyin?.owner?.[k] ?? ''])) }
   // 联动密钥只由插件生成，面板不能改
   next.bridge.token = current.bridge?.token || ''
   // B 站：只改了其中一个值时，另一个保留；整串粘进来的会在 normalize 里拆开

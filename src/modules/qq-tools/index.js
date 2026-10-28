@@ -43,8 +43,8 @@ export default {
           const [kind, id] = String(target || '').split(':')
           const okList = kind === 'group' ? cfg.allow.groups : kind === 'private' ? [cfg.ownerQQ, ...cfg.allow.private] : []
           if (!okList.includes(String(id))) return { ok: false, message: '不在白名单里，不能发' }
-          await hub.deliver(`${kind}:${id}`, String(text || ''))
-          return { ok: true, message: '发出去了' }
+          const r = await hub.deliver(`${kind}:${id}`, String(text || ''))
+          return r?.missedAt?.length ? { ok: true, message: `发出去了，但 ${r.missedAt.map((n) => '@' + n).join('、')} 没对上群里的人（群名片和昵称里没有），只是文字、对方收不到提醒。要真 @ 得写 <at:QQ号>，不知道就问主人要他的群名片或 QQ 号` } : { ok: true, message: '发出去了' }
         },
       }))
       return tools

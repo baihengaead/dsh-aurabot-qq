@@ -1,6 +1,6 @@
 // 文字 → 语音文件。
 //   首选：edge-tts（微软在线朗读，音色好），装在插件自己的 Python 虚拟环境 C:\Aurabot\pyenv 里，不污染系统。
-//   兜底：Windows 自带的中文语音（System.Speech / Huihui），什么都不装也能用。
+//   兜底：Windows 自带的中文语音（System.Speech / Huihui），什么都不装也能用（只有 Windows 有）。
 // 管线：文字 → TTS → 文件路径。任何一步失败由调用方退回发文字。（RVC 音色目前用在翻唱上，见 src/song/）
 
 import { spawn } from 'node:child_process'
@@ -14,7 +14,9 @@ import { dataDir } from '../core/store.js'
 // edge-tts 的私有 Python 环境，一键安装时自动创建。老安装沿用 C:\Aurabot\pyenv；新安装放在用户目录下
 const LEGACY_PYENV = 'C:\\Aurabot\\pyenv'
 export const PYENV_DIR = process.env.AURABOT_PYENV || (existsSync(LEGACY_PYENV) ? LEGACY_PYENV : join(homedir(), 'Aurabot', 'pyenv'))
-const pyExe = () => join(PYENV_DIR, 'Scripts', 'python.exe')
+const WIN = process.platform === 'win32'
+// 虚拟环境的目录结构 Windows 和 Linux / macOS 不一样
+const pyExe = () => (WIN ? join(PYENV_DIR, 'Scripts', 'python.exe') : join(PYENV_DIR, 'bin', 'python'))
 
 function run(cmd, args, { timeoutMs = 60000, input, env } = {}) {
   return new Promise((resolve) => {
@@ -58,7 +60,13 @@ function outDir() {
 }
 
 export function edgeInstalled() {
-  return existsSync(pyExe()) && existsSync(join(PYENV_DIR, 'Lib', 'site-packages', 'edge_tts'))
+  if (!existsSync(pyExe())) return false
+  if (WIN) return existsSync(join(PYENV_DIR, 'Lib', 'site-packages', 'edge_tts'))
+  try {
+    return readdirSync(join(PYENV_DIR, 'lib')).some((v) => v.startsWith('python') && existsSync(join(PYENV_DIR, 'lib', v, 'site-packages', 'edge_tts')))
+  } catch (error) {
+    return false
+  }
 }
 
 /** 面板「安装语音组件」：建虚拟环境并 pip 安装 edge-tts（开源，LGPL）。 */
@@ -66,12 +74,13 @@ export async function installEdge(log) {
   mkdirSync(PYENV_DIR, { recursive: true })
   if (!existsSync(pyExe())) {
     // 电脑上有 Python 就直接用；没有就用 uv 下一个私有的 Python（不用用户自己装）
-    let r = await run('py', ['-3', '-m', 'venv', PYENV_DIR], { timeoutMs: 180000 })
+    let r = WIN ? await run('py', ['-3', '-m', 'venv', PYENV_DIR], { timeoutMs: 180000 }) : { code: -1 }
+    if (r.code !== 0) r = await run('python3', ['-m', 'venv', PYENV_DIR], { timeoutMs: 180000 })
     if (r.code !== 0) r = await run('python', ['-m', 'venv', PYENV_DIR], { timeoutMs: 180000 })
     if (r.code !== 0) {
       log?.info('电脑上没有可用的 Python，用 uv 准备一个私有的')
       const uv = await findOrFetchUv(log)
-      if (!uv) return { ok: false, message: '准备 Python 失败：下载安装工具 uv 没成功，检查一下网络（开代理或换个网络）再试' }
+      if (!uv) return { ok: false, message: WIN ? '准备 Python 失败：下载安装工具 uv 没成功，检查一下网络（开代理或换个网络）再试' : '准备 Python 失败：电脑上没有能建虚拟环境的 Python（Debian / Ubuntu 装一下 python3-venv），也没有 uv（curl -LsSf https://astral.sh/uv/install.sh | sh）' }
       const env = { UV_PYTHON_INSTALL_DIR: join(dirname(PYENV_DIR), 'python'), UV_PYTHON_INSTALL_MIRROR: 'https://registry.npmmirror.com/-/binary/python-build-standalone' }
       r = await run(uv, ['venv', '-q', PYENV_DIR, '--python', '3.12'], { timeoutMs: 600000, env })
       if (r.code !== 0) return { ok: false, message: '准备 Python 失败：' + r.err.slice(-300) }
@@ -98,6 +107,8 @@ export async function installEdge(log) {
 async function findOrFetchUv(log) {
   if (process.env.AURABOT_UV) return process.env.AURABOT_UV
   if ((await run('uv', ['--version'], { timeoutMs: 15000 })).code === 0) return 'uv'
+  // Linux / macOS：只找装好的（官方安装脚本默认放 ~/.local/bin 或 ~/.cargo/bin），不自动下载
+  if (!WIN) return [join(homedir(), '.local', 'bin', 'uv'), join(homedir(), '.cargo', 'bin', 'uv')].find((p) => existsSync(p)) || ''
   const local = join(dirname(PYENV_DIR), 'bin', 'uv.exe')
   for (const p of [local, join('C:\\Aurabot', 'rvc', 'bin', 'uv.exe'), join(homedir(), 'Aurabot', 'rvc', 'bin', 'uv.exe')]) if (existsSync(p)) return p
   log?.info('下载 uv …')
@@ -223,6 +234,7 @@ export async function textToSpeech(text, opt = {}, log) {
     }
   }
   if (!file) {
+    if (!WIN) throw new Error('语音没合成出来：Linux / macOS 上没有 Windows 自带语音可以兜底，先在「语音」页装好 edge-tts，或者用本地 TTS 服务')
     file = await windowsSynth(clean)
     engine = 'windows'
   }

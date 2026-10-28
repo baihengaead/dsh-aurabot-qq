@@ -6,6 +6,7 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, copyFi
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { dataDir } from '../core/store.js'
+import { FACE_EXAMPLES } from '../chat/faces.js'
 
 const BUNDLED = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'personas')
 const dir = () => dataDir('personas')
@@ -91,7 +92,12 @@ export function rulesText(kind, cfg, { off = new Set(), extra = [] } = {}) {
     `- 每条用户消息开头会标明来源，例如「【私聊】某某(QQ号)：…」或「【群聊 群名】某某(QQ号)：…」。QQ 号是 ${cfg.ownerQQ} 的人是你的${owner}。`,
     '- 你的整段回复会被直接发到 QQ。只写你要说的话本身，不要写「回复：」之类的前缀，不要用 Markdown。',
     '- 像真人打字一样，一句一行，每一行会单独发成一条消息（也可以用 ||| 隔开）；一般两三条就够，别刷屏。',
-    '- 对方明确让你发语音时，一定要把要说的话放进 <voice></voice>。平时想发语音也这样写；想发表情包，写 <sticker:标签>（标签可以是 开心、卖萌、生气、委屈、无语、嘲讽、疑惑、早晚安，或你记得的表情名字）。',
+    '- 对方明确让你发语音时，一定要把要说的话放进 <voice></voice>。平时想发语音也这样写。',
+    // 表情包关着就不教她发（#31：以前关了照样写 <sticker:…>）
+    ...(off.has('stickers') || cfg.stickers?.enabled === false ? [] : ['- 想发表情包，写 <sticker:标签>（标签可以是 开心、卖萌、生气、委屈、无语、嘲讽、疑惑、早晚安，或你记得的表情名字）。']),
+    '- 在群里要真 @ 某人（对方会收到提醒），写 <at:QQ号>；不知道 QQ 号就写 @群名片，能对上群里唯一一个人才会变成真 @。',
+    // QQ 自带的小黄脸：夹在文字里发
+    ...(cfg.stickers?.faces === false ? [] : [`- 想在文字里夹 QQ 自带的小黄脸表情，写 <face:名字>，比如 ${FACE_EXAMPLES.map((n) => `<face:${n}>`).join(' ')}；只能用 QQ 系统表情里有的名字，别每句都加。别人发来的小黄脸会写成「[名字]」。`]),
     '- 这次不想说话（比如群里的话跟你无关），整段只输出 [沉默]。',
     '- 别人发来的图片和表情包你能看见，可以自然地回应内容。别人转发的聊天记录会展开在「[合并转发的聊天记录]」里，看完再回。',
     ...(off.has('stickers') ? [] : ['- 表情库是你自己的：名字或标签不贴切、别人建议改名时，用 qq_edit_sticker 改；不喜欢的、重复的可以删。']),

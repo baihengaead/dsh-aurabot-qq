@@ -328,7 +328,7 @@ test('解析：合并转发记下 id，回复里的 <poke> 变成戳一戳', asy
 test('#6 改资料权限：默认仅主人私聊；所有人含群；关了都不行；执行时再查', async () => {
   const { normalize } = await import('../src/core/config.js')
   const d = normalize({ ownerQQ: '1' })
-  assert.deepEqual(d.profilePerms, { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', biliSign: 'owner', biliAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner', douyinBrowse: 'owner', douyinLike: 'owner', douyinComment: 'owner', douyinReplyComment: 'owner', douyinFollow: 'owner', douyinDm: 'owner', douyinShareOwner: 'owner', douyinReplyOwnerDm: 'owner', douyinSign: 'owner', douyinNickname: 'owner', douyinAvatar: 'owner' })
+  assert.deepEqual(d.profilePerms, { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', biliSign: 'owner', biliAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner', douyinBrowse: 'owner', douyinLike: 'owner', douyinComment: 'owner', douyinShareOwner: 'owner' })
   assert.equal(normalize({ profilePerms: { qqAvatar: 'boss', biliSign: 'all' } }).profilePerms.qqAvatar, 'owner', '乱填的回到默认')
   const ownerPm = { kind: 'private', userId: '1' }
   const otherPm = { kind: 'private', userId: '2' }
@@ -354,4 +354,23 @@ test('#6 头像来源：只收网址或「刚才那张」，本地路径不收',
   assert.equal(avatarSource('C:/Windows/x.png').ok, false)
   assert.equal(avatarSource('file:///etc/passwd').ok, false)
   assert.equal(avatarSource('base64://AAAA').ok, false)
+})
+
+test('#28 QQ 网关：默认 SnowLuma；接自己的 OneBot 机器人时用 onebot；乱填的回到 SnowLuma', async () => {
+  const { normalize } = await import('../src/core/config.js')
+  assert.equal(normalize({}).gateway, 'snowluma')
+  assert.equal(normalize({ gateway: 'onebot', snowluma: { wsUrl: 'ws://napcat:3001' } }).gateway, 'onebot')
+  assert.equal(normalize({ gateway: 'onebot', snowluma: { wsUrl: 'ws://napcat:3001' } }).snowluma.wsUrl, 'ws://napcat:3001')
+  assert.equal(normalize({ gateway: 'whatever' }).gateway, 'snowluma')
+})
+
+test('#32 工作区位置：面板填的绝对路径优先，相对路径 / 乱填的当没填', async () => {
+  const { normalize } = await import('../src/core/config.js')
+  const { workspaceDirOf, WORKSPACE_DIR } = await import('../src/chat/hub.js')
+  assert.equal(normalize({}).workspaceDir, '')
+  assert.equal(workspaceDirOf(normalize({})), WORKSPACE_DIR)
+  assert.equal(workspaceDirOf(normalize({ workspaceDir: ' D:\\Aurabot\\qq-chats ' })), 'D:\\Aurabot\\qq-chats')
+  assert.equal(workspaceDirOf(normalize({ workspaceDir: '/srv/aurabot/chats' })), '/srv/aurabot/chats')
+  assert.equal(normalize({ workspaceDir: 'chats' }).workspaceDir, '')
+  assert.equal(normalize({ workspaceDir: '..\\x' }).workspaceDir, '')
 })

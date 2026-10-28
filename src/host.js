@@ -18,7 +18,7 @@ import { createLogger } from './core/logger.js'
 import { registerSecret, redact } from './core/redact.js'
 import { createOneBotClient } from './onebot/client.js'
 import { createSnowLumaManager, DOWNLOAD_PAGE } from './snowluma/manager.js'
-import { createHub, WORKSPACE_DIR } from './chat/hub.js'
+import { createHub, workspaceDirOf } from './chat/hub.js'
 import { createLocal, fileOf, toImageBuffer } from './local/local.js'
 import { createGroupRoles } from './chat/group-roles.js'
 import { defaultModel, askModel, modelReasoning, modelVision, clearReasoningCache, clearVisionCache } from './core/llm.js'
@@ -82,7 +82,8 @@ export function apply(ctx) {
   })
   const endpoint = () => {
     const s = cfg.snowluma
-    const auto = s.httpUrl && s.wsUrl ? null : snowluma.endpoint()
+    // 接自己的 OneBot 时只认填的地址；用 SnowLuma 时没填的从它的配置里读
+    const auto = cfg.gateway === 'onebot' || (s.httpUrl && s.wsUrl) ? null : snowluma.endpoint()
     return {
       httpUrl: s.httpUrl || auto?.httpUrl || '',
       wsUrl: s.wsUrl || auto?.wsUrl || '',
@@ -337,15 +338,16 @@ export function apply(ctx) {
       if (onebot.state !== 'stopped') onebot.stop()
       return
     }
+    const own = cfg.gateway === 'snowluma' // 接别人的 OneBot 时不启动、不注入 SnowLuma
     const inst = snowluma.detect()
-    if (inst.installed && cfg.snowluma.autoStart && !(await snowluma.running())) {
+    if (own && inst.installed && cfg.snowluma.autoStart && !(await snowluma.running())) {
       const r = await snowluma.start()
       log.info('SnowLuma：', r.message)
     }
     // 上次连上的不是机器人号：等主人手动点「接入机器人号」或改设置再连
     if (wrongAccount) return
     if (onebot.state === 'stopped') onebot.start()
-    if (cfg.snowluma.autoAttach && cfg.snowluma.webuiPassword && onebotState !== 'connected' && (await snowluma.running())) {
+    if (own && cfg.snowluma.autoAttach && cfg.snowluma.webuiPassword && onebotState !== 'connected' && (await snowluma.running())) {
       const last = snowluma.lastAttach
       if (Date.now() - last.at > 60_000) {
         const r = await snowluma.attachBot()
@@ -404,7 +406,7 @@ export function apply(ctx) {
       voice: { edgeInstalled: use('voice')?.edgeInstalled?.() ?? false },
       song: use('song')?.status?.() ?? null,
       sessions: hub.sessions(),
-      workspaceDir: WORKSPACE_DIR,
+      workspaceDir: workspaceDirOf(cfg),
       personas: listPersonas(),
       modules: mods.status(),
       bridge: { dshTools: cfg.bridge.dshTools, http: cfg.bridge.http, hasToken: Boolean(cfg.bridge.token), tools: bridge.deniedTools(), toolsService: Boolean(ctx.get?.('tools')) },
@@ -422,7 +424,7 @@ export function apply(ctx) {
     setConfig(mergeFromPanel(cfg, body))
     let pw = null
     if (newPw && newPw !== before.snowluma.webuiPassword) pw = await snowluma.setPassword(newPw)
-    const changedConn = ['httpUrl', 'wsUrl', 'httpToken', 'wsToken', 'dir'].some((k) => before.snowluma[k] !== cfg.snowluma[k])
+    const changedConn = before.gateway !== cfg.gateway || ['httpUrl', 'wsUrl', 'httpToken', 'wsToken', 'dir'].some((k) => before.snowluma[k] !== cfg.snowluma[k])
     // 换了模型：思考强度和「能不能看图」的探测结果都得重来，不然要等 10 分钟缓存过期
     const changedModel = before.model.provider !== cfg.model.provider || before.model.model !== cfg.model.model
     if (changedModel) { clearReasoningCache(); clearVisionCache() }
@@ -516,6 +518,12 @@ export function apply(ctx) {
   async function connectionProblem() {
     if (!cfg.enabled) return '总开关关着（右上角），打开后才会连'
     if (!cfg.botQQ) return '还没填机器人 QQ 号'
+    if (cfg.gateway === 'onebot') {
+      const ep = endpoint()
+      if (!ep.wsUrl) return '还没填 OneBot 的 WebSocket 地址：在「连接」页填你的 OneBot v11 正向 WebSocket 地址（收消息要靠它；HTTP 可以不填）'
+      if (wrongAccount) return `连上的是 ${wrongAccount}，不是机器人号 ${cfg.botQQ}，已经断开：让你的 OneBot 服务登录机器人号，再点「重新连接」`
+      return `连 ${ep.wsUrl || ep.httpUrl} 没连上：确认你的 OneBot 服务开着、地址和 token 填对了（Docker 里的话，地址要用 DSH 能访问到的主机名 / 端口）`
+    }
     const inst = snowluma.detect()
     if (!inst.installed && !(cfg.snowluma.wsUrl || cfg.snowluma.httpUrl)) return 'SnowLuma 没装好：' + inst.reason
     if (inst.installed && !(await snowluma.running())) return 'SnowLuma 没在运行：点上面的「启动」'
@@ -773,7 +781,7 @@ export function apply(ctx) {
     }
   })
 
-  log.info(`Aurabot v${VERSION} 已加载｜总开关 ${cfg.enabled ? '开' : '关'}｜试运行 ${cfg.dryRun ? '开' : '关'}｜工作区 ${WORKSPACE_DIR}`)
+  log.info(`Aurabot v${VERSION} 已加载｜总开关 ${cfg.enabled ? '开' : '关'}｜试运行 ${cfg.dryRun ? '开' : '关'}｜工作区 ${workspaceDirOf(cfg)}`)
 
   return {
     hub, onebot, snowluma, getConfig, setConfig, logger, modules: mods, bridge, ready: booted,

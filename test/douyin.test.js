@@ -1,1360 +1,534 @@
-// 抖音：认号 / 主页链接、推荐页判定、假驱动刷一轮、日上限、试运行不计次、写操作总闸、主人私信（只认 sec_uid）、#4 相关回归。
+// 抖音：链接 / 接口数据解析、给她看的摘要、选标签页、配置迁移；用假的抖音网页测刷一轮（按 id 点赞评论、上限、试运行、验证码停手、
+// 在 QQ 上分享）、主人让她点赞评论、打开面板不启动浏览器（#4）。
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-let util, duty, cdp, imMod, normalize, profilePermDefault, DOUYIN_PERM_KEYS, permOf
+let site
+let browser
+let duty
+let normalize
+let DOUYIN_PERM_KEYS
+let mergeFromPanel
 
 before(async () => {
   process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'aurabot-douyin-'))
-  util = await import('../src/douyin/util.js')
+  site = await import('../src/douyin/site.js')
+  browser = await import('../src/douyin/browser.js')
   duty = await import('../src/douyin/duty.js')
-  cdp = await import('../src/douyin/cdp.js')
-  imMod = await import('../src/douyin/im.js')
-  ;({ normalize } = await import('../src/core/config.js'))
-  ;({ profilePermDefault, DOUYIN_PERM_KEYS, permOf } = await import('../src/chat/access.js'))
+  ;({ normalize, mergeFromPanel } = await import('../src/core/config.js'))
+  ;({ DOUYIN_PERM_KEYS } = await import('../src/chat/access.js'))
 })
 
-test('工具：认抖音号 / 主页链接 / 短链 / 视频链接', () => {
-  assert.deepEqual(util.parseUserInput('https://www.douyin.com/user/MS4wLjABAAAAabcdefghijklmnopqrs'), { secUid: 'MS4wLjABAAAAabcdefghijklmnopqrs' })
-  assert.deepEqual(util.parseUserInput('https://v.douyin.com/AbCdEf/'), { short: 'https://v.douyin.com/AbCdEf/' })
-  assert.deepEqual(util.parseUserInput('@my.douyin_01'), { uniqueId: 'my.douyin_01' })
-  assert.equal(util.parseUserInput(''), null)
-  assert.deepEqual(util.findAwemeId('看这个 https://www.douyin.com/video/7123456789012345678'), { awemeId: '7123456789012345678' })
-  assert.deepEqual(util.findAwemeId('https://v.douyin.com/xyz123/'), { short: 'https://v.douyin.com/xyz123/' })
-  assert.ok(util.isRecommendUrl('https://www.douyin.com/?recommend=1'))
-  assert.ok(util.isRecommendUrl('https://www.douyin.com/?recommend=1&from_nav=1'))
-  assert.equal(util.isRecommendUrl('https://www.douyin.com/jingxuan'), false)
-  assert.equal(util.isRecommendUrl('https://www.douyin.com/?tab=home'), false)
-  assert.ok(util.sameAvatar('https://cdn/x/abc~tplv-xxx.jpeg', 'https://other/abc~c5_300x300.jpeg'))
-  assert.equal(util.sameAvatar('https://cdn/a.jpg', 'https://cdn/b.jpg'), false)
-  assert.ok(util.looksLikeVerify('请完成安全验证'))
-  assert.ok(util.looksLimited('操作过于频繁，请稍后再试'))
+// 和网页端推荐接口一样形状的一条视频
+const aweme = (id, o = {}) => ({
+  aweme_id: id,
+  desc: `视频${id}的文案 #猫咪 #日常`,
+  item_title: `视频${id}`,
+  author: { nickname: '作者' + id, sec_uid: 'MS4w' + id },
+  statistics: { digg_count: 123456, comment_count: 789, share_count: 10, collect_count: 5 },
+  video: { duration: 61000 },
+  text_extra: [{ hashtag_name: '猫咪' }, { hashtag_name: '日常' }],
+  video_tag: [{ tag_name: '动物' }, { tag_name: '萌宠' }],
+  ...o,
 })
 
-test('配置：抖音总开关默认关；权限默认仅主人；写闸默认；改资料日上限；面板改不了 secUid', () => {
+test('解析：认视频链接 / modal_id / 图文 / 短链 / 纯 id', () => {
+  assert.deepEqual(site.findAwemeId('看这个 https://www.douyin.com/video/7675305737601436971?x=1'), { awemeId: '7675305737601436971' })
+  assert.deepEqual(site.findAwemeId('https://www.douyin.com/jingxuan?modal_id=7675305737601436971'), { awemeId: '7675305737601436971' })
+  assert.deepEqual(site.findAwemeId('https://www.douyin.com/note/7675305737601436971'), { awemeId: '7675305737601436971' })
+  assert.deepEqual(site.findAwemeId('7.43 复制打开抖音 https://v.douyin.com/iAbC-12/ 哈哈'), { short: 'https://v.douyin.com/iAbC-12/' })
+  assert.deepEqual(site.findAwemeId('7675305737601436971'), { awemeId: '7675305737601436971' })
+  assert.equal(site.findAwemeId('没有链接'), null)
+})
+
+test('解析：短链跟着跳转拿到视频 id', async () => {
+  const hops = { 'https://v.douyin.com/abc/': 'https://www.iesdouyin.com/share/video/7675305737601436971/?region=CN' }
+  const fake = async (url) => ({ headers: { get: (k) => (k === 'location' ? hops[url] || null : null) } })
+  assert.equal(await site.resolveShort('https://v.douyin.com/abc/', fake), '7675305737601436971')
+  assert.equal(await site.resolveShort('https://v.douyin.com/none/', fake), '')
+})
+
+test('解析：接口里的视频 → 标题、分类、抖音的内容摘要、分段；广告和直播丢掉', () => {
+  const v = site.normalizeAweme(aweme('7000000000000000001', { chapter_abstract: '讲了一只猫学会开门的过程。', chapter_list: [{ desc: '开头', detail: '' }, { desc: '学开门', detail: '猫试了三次' }] }))
+  assert.equal(v.title, '视频7000000000000000001')
+  assert.equal(v.author, '作者7000000000000000001')
+  assert.equal(v.duration, 61)
+  assert.deepEqual(v.category, ['动物', '萌宠'])
+  assert.deepEqual(v.tags, ['猫咪', '日常'])
+  assert.equal(v.summary, '讲了一只猫学会开门的过程。')
+  assert.deepEqual(v.chapters, ['开头', '学开门：猫试了三次'])
+  assert.equal(site.normalizeAweme(aweme('7000000000000000002', { is_ads: true })), null)
+  assert.equal(site.normalizeAweme(aweme('7000000000000000003', { cell_room: {} })), null)
+  assert.equal(site.normalizeAweme({ desc: '没 id' }), null)
+  // 没有 item_title 时用去掉话题的文案
+  assert.equal(site.normalizeAweme(aweme('7000000000000000004', { item_title: '' })).title, '视频7000000000000000004的文案')
+})
+
+test('解析：热评按赞数排；给她看的摘要里有分类、摘要、文案、热评', () => {
+  const cs = site.parseComments({ comments: [{ text: '一般', digg_count: 3, user: { nickname: 'a' } }, { text: '太可爱了', digg_count: 5000, user: { nickname: 'b' } }, { text: '', digg_count: 9 }] })
+  assert.deepEqual(cs.map((c) => c.text), ['太可爱了', '一般'])
+  const d = site.digestOf(site.normalizeAweme(aweme('7000000000000000001', { chapter_abstract: '猫学开门' })), cs)
+  assert.match(d, /《视频7000000000000000001》 作者：作者7000000000000000001 {2}赞 12万/)
+  assert.match(d, /分类：动物 \/ 萌宠/)
+  assert.match(d, /内容摘要：猫学开门/)
+  assert.match(d, /热评：\n {2}b：太可爱了（5000 赞）/)
+})
+
+test('浏览器：挑抖音标签页、多的抖音页要关掉；端口文件读不到返回 0', () => {
+  const t = (id, url, type = 'page') => ({ id, url, type, webSocketDebuggerUrl: 'ws://x/' + id })
+  const r = browser.pickPage([t('a', 'about:blank'), t('b', 'https://www.douyin.com/jingxuan'), t('c', 'https://www.douyin.com/video/1'), t('d', 'https://lf.example/x', 'iframe')])
+  assert.equal(r.page.id, 'b')
+  assert.deepEqual(r.extra.map((x) => x.id), ['c'])
+  assert.equal(browser.pickPage([t('a', 'about:blank')]).page.id, 'a')
+  const dir = mkdtempSync(join(tmpdir(), 'dy-port-'))
+  assert.equal(browser.readPortFile(dir), 0)
+  writeFileSync(join(dir, 'DevToolsActivePort'), '55110\n/devtools/browser/x\n')
+  assert.equal(browser.readPortFile(dir), 55110)
+  assert.equal(browser.findBrowser('C:\\nope\\msedge.exe', () => false), '')
+})
+
+test('配置：总开关默认关；只剩 4 项权限且默认仅主人；1.0.x 的私信等设置清掉、主人抖音号留着，shareOwner 上限迁到 share', () => {
   const c = normalize({})
   assert.equal(c.douyin.enabled, false)
-  assert.equal(c.douyin.caps.like, 30)
-  assert.equal(c.douyin.caps.comment, 3)
-  assert.equal(c.douyin.caps.sign, 2)
-  assert.equal(c.douyin.caps.nickname, 2)
-  assert.equal(c.douyin.caps.avatar, 1)
-  assert.equal(c.douyin.perRun, 5)
-  assert.equal(c.douyin.gate.maxWritesPerDay, 60)
-  assert.equal(c.douyin.gate.minWriteGapSec, 20)
-  assert.equal(c.douyin.gate.newAccountDays, 3)
-  assert.equal(c.douyin.socialInterruptBrowse, true)
-  for (const k of DOUYIN_PERM_KEYS) {
-    assert.equal(profilePermDefault(k), 'owner')
-    assert.equal(c.profilePerms[k], 'owner')
-    assert.equal(permOf(c, k), 'owner')
-  }
+  assert.deepEqual(c.douyin.caps, { like: 30, comment: 3, share: 5, atOwner: 3 })
+  assert.deepEqual(DOUYIN_PERM_KEYS, ['douyinBrowse', 'douyinLike', 'douyinComment', 'douyinShareOwner'])
+  for (const k of DOUYIN_PERM_KEYS) assert.equal(c.profilePerms[k], 'owner')
+  assert.equal(c.profilePerms.douyinDm, undefined)
+  const old = normalize({ douyin: { enabled: true, owner: { secUid: 'x', avatar: 'a.jpg' }, atOwnerOnLikeChance: 0.7, dmPollMinutes: 7, minimize: true, shareBias: 'off', caps: { like: 10, shareOwner: 2, dm: 5 } }, profilePerms: { douyinDm: 'all' } })
+  assert.deepEqual(old.douyin.owner, { input: '', secUid: 'x', uid: '', nickname: '', confirmedInput: '' })
+  assert.equal(old.douyin.atOwnerOnLikeChance, undefined)
+  assert.equal(old.douyin.dmPollMinutes, 7, '看私信间隔这个设置又用上了，保留')
+  assert.equal(old.douyin.shareBias, 'stingy')
+  assert.deepEqual(old.douyin.caps, { like: 10, comment: 3, share: 2, atOwner: 3 })
+  assert.equal(old.profilePerms.douyinDm, undefined)
 })
 
-test('配置：mergeFromPanel 保留核对过的 secUid / uid', async () => {
-  const { mergeFromPanel } = await import('../src/core/config.js')
-  const cur = normalize({ douyin: { owner: { input: 'aaa', secUid: 'SEC1', uid: 'U1', nickname: '主人', avatar: 'http://a', confirmedInput: 'aaa' } } })
-  const next = mergeFromPanel(cur, { douyin: { owner: { input: 'bbb', secUid: 'HACK', uid: 'HACKU', nickname: '假的', avatar: 'x', confirmedInput: 'HACK' } } })
-  assert.equal(next.douyin.owner.input, 'bbb')
-  assert.equal(next.douyin.owner.secUid, 'SEC1')
-  assert.equal(next.douyin.owner.uid, 'U1')
-  assert.equal(next.douyin.owner.nickname, '主人')
-  assert.equal(next.douyin.owner.confirmedInput, 'aaa')
-  assert.equal(util.ownerConfirmed(next), false)
-})
-
-test('配置：normalize 保留数字 uid', () => {
-  const c = normalize({ douyin: { owner: { input: 'x', secUid: 'SEC', uid: '123456789', nickname: '主', avatar: '', confirmedInput: 'x' } } })
-  assert.equal(c.douyin.owner.uid, '123456789')
-  assert.equal(c.douyin.owner.secUid, 'SEC')
-})
-
-test('核对主人：resolveUser 带回的 uid 与 secUid 都写入 owner', async () => {
-  let persisted = null
-  const owner = { secUid: 'MS4wLjABAAAAabcdefghijklmnopqrs', uid: '9876543210', nickname: '核对昵称', avatar: 'https://x/o.jpg' }
-  const drv = cdp.createFakeDriver({ owner })
-  const im = imMod.createFakeImClient({ owner: { uid: owner.uid, secUid: owner.secUid } })
-  const base = normalize({
-    enabled: true, dryRun: false, ownerQQ: '10000001', ownerName: '主人',
-    douyin: {
-      enabled: true,
-      owner: { input: 'owner_id', secUid: '', uid: '', nickname: '', avatar: '', confirmedInput: '' },
-      caps: { like: 30, comment: 1, replyComment: 6, follow: 5, dm: 5, shareOwner: 3, dmReply: 20 },
-      gate: { maxWritesPerDay: 60, minWriteGapSec: 0, newAccountDays: 3 },
+/** 假的抖音网页：记下每次点赞 / 评论落在哪个视频上。 */
+function fakeSite({ feed = [], loggedIn = true, verify = '', likeError = null, commentError = null, liked = new Set(), mentionFails = false, shareFails = false, chat = [] } = {}) {
+  const calls = { ensure: 0, watch: [], like: [], comment: [], share: [], feed: 0, dms: 0, dm: [] }
+  return {
+    calls,
+    ensure: async () => { calls.ensure++; return { ok: true } },
+    self: async () => (loggedIn ? { secUid: 'MS4wSELF', nickname: '她的小号' } : null),
+    verify: async () => verify,
+    feed: async () => { calls.feed++; return calls.feed === 1 ? feed.map(site.normalizeAweme).filter(Boolean) : [] },
+    detail: async (id) => site.normalizeAweme(aweme(id)),
+    comments: async () => [{ name: '路人', text: '好看', likes: 10 }],
+    watch: async (id) => { calls.watch.push(id) },
+    like: async (id) => { if (likeError) throw likeError; calls.like.push(id); return liked.has(id) ? { ok: true, already: true } : { ok: true } },
+    comment: async (id, text, o = {}) => {
+      if (commentError) throw commentError
+      if (o.at && mentionFails) throw Object.assign(new Error('@ 候选里没找到主人（可能互相没关注）'), { code: 'mention' })
+      calls.comment.push(o.at ? [id, text, o.at] : [id, text])
+      return { ok: true, atOwner: Boolean(o.at) }
     },
-    profilePerms: Object.fromEntries(DOUYIN_PERM_KEYS.map((k) => [k, 'owner'])),
-  })
-  const getConfig = () => base
-  getConfig._setOwner = (o) => {
-    persisted = { ...o }
-    Object.assign(base.douyin.owner, o)
+    share: async (id, who) => { if (shareFails) throw Object.assign(new Error('分享面板里没找到主人（可能互相没关注、私信不通）'), { code: 'share' }); calls.share.push([id, who.secUid, who.nickname]); return { ok: true } },
+    user: async (secUid) => ({ secUid, uid: '4182', nickname: '主人的新昵称', douyinId: 'master01' }),
+    findByDouyinId: async (id) => { if (id !== 'master01') throw new Error('按抖音号没搜到这个人'); return { secUid: 'MS4wOWNER', uid: '4182', nickname: '主人小号', douyinId: 'master01' } },
+    dms: async (uid) => { calls.dms++; calls.dmUid = uid; return chat.slice() },
+    sendDm: async (text) => { if (calls.dmFail > 0) { calls.dmFail--; throw new Error('私信输入框点不进去') } calls.dm.push(text); return { ok: true } },
+    loginStart: async () => ({ ok: true, loggedIn: false, shot: 'data:image/png;base64,QR' }),
+    loginPoll: async () => ({ ok: true, loggedIn: true, me: { secUid: 'MS4wSELF', nickname: '她的小号' } }),
+    show: async () => {},
+    connected: () => false,
   }
-  const d = duty.createDouyin({
-    getConfig,
-    hub: { runSystemTurn: async () => ({ ok: true, text: '{}' }), chatOfSession: () => 'c' },
-    memory: { recentEvents: () => [], addEvent: () => {}, add: () => {} },
-    log: { info() {}, warn() {}, debug() {} },
-    driver: drv,
-    im,
-    dataFile: join(process.env.AURABOT_DATA_DIR, `douyin-confirm-${Math.random().toString(16).slice(2)}.json`),
-  })
-  const r = await d.confirmOwner('https://www.douyin.com/user/MS4wLjABAAAAabcdefghijklmnopqrs')
-  assert.equal(r.ok, true, r.message)
-  assert.equal(r.secUid, owner.secUid)
-  assert.equal(r.uid, owner.uid)
-  assert.ok(persisted)
-  assert.equal(persisted.uid, '9876543210')
-  assert.equal(persisted.secUid, owner.secUid)
-  assert.equal(persisted.confirmedInput, 'https://www.douyin.com/user/MS4wLjABAAAAabcdefghijklmnopqrs')
-  assert.equal(base.douyin.owner.uid, '9876543210')
-  assert.equal(util.ownerConfirmed(base), true)
-})
+}
 
-test('核对主人：非数字 uid 不写入 owner.uid；数字 uid 持久化', async () => {
-  let persisted = null
-  const owner = { secUid: 'MS4wLjABAAAAabcdefghijklmnopqrs', uid: 'not-a-uid', nickname: 'x', avatar: '' }
-  const drv = cdp.createFakeDriver({ owner })
-  const base = normalize({
-    enabled: true, dryRun: false, ownerQQ: '10000001', ownerName: '主人',
-    douyin: {
-      enabled: true,
-      owner: { input: '', secUid: '', uid: '', nickname: '', avatar: '', confirmedInput: '' },
-      caps: { like: 30, comment: 1, replyComment: 6, follow: 5, dm: 5, shareOwner: 3, dmReply: 20 },
-      gate: { maxWritesPerDay: 60, minWriteGapSec: 0, newAccountDays: 3 },
-    },
-    profilePerms: Object.fromEntries(DOUYIN_PERM_KEYS.map((k) => [k, 'owner'])),
-  })
-  const getConfig = () => base
-  getConfig._setOwner = (o) => { persisted = { ...o }; Object.assign(base.douyin.owner, o) }
-  const d = duty.createDouyin({
-    getConfig,
-    hub: { runSystemTurn: async () => ({ ok: true, text: '{}' }), chatOfSession: () => 'c' },
-    memory: { recentEvents: () => [], addEvent: () => {}, add: () => {} },
-    log: { info() {}, warn() {}, debug() {} },
-    driver: drv,
-    dataFile: join(process.env.AURABOT_DATA_DIR, `douyin-uid-bad-${Math.random().toString(16).slice(2)}.json`),
-  })
-  const r = await d.confirmOwner('https://www.douyin.com/user/MS4wLjABAAAAabcdefghijklmnopqrs')
-  assert.equal(r.ok, true)
-  assert.equal(r.uid, '')
-  assert.equal(persisted.uid, '')
-  assert.equal(persisted.secUid, owner.secUid)
-
-  // 数字 uid：假驱动改 owner 后再核对应写入
-  drv._state.owner.uid = '9988776655'
-  const r2 = await d.confirmOwner('https://www.douyin.com/user/MS4wLjABAAAAabcdefghijklmnopqrs')
-  assert.equal(r2.uid, '9988776655')
-  assert.equal(base.douyin.owner.uid, '9988776655')
-})
-
-
-const feed = [
-  { awemeId: '1001', author: '阿猫', authorSecUid: 'sec_cat', desc: '猫砂盆测评', likes: 1000, comments: 10, tags: ['猫'] },
-  { awemeId: '1002', author: '阿狗', authorSecUid: 'sec_dog', desc: '狗狗跑步', likes: 2000, comments: 20, tags: ['狗'] },
-  { awemeId: '1003', author: '阿鸟', authorSecUid: 'sec_bird', desc: '鹦鹉说话', likes: 500, comments: 5, tags: [] },
-]
-
-function fakes({ decisions, cfgOver = {}, script = {}, dryRun = false, imScript = {} } = {}) {
-  const events = []
-  const facts = []
+let n = 0
+function setup({ decisions = [], cfgOver = {}, douyinOver = {}, siteOpts = {}, now, onWait = () => {}, owner, turn } = {}) {
+  process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'aurabot-douyin-' + n++ + '-'))
   const sent = []
-  const drv = cdp.createFakeDriver({ feed: feed.map((x) => ({ ...x })), owner: script.owner || { secUid: 'owner_sec', uid: 'owner_uid', nickname: '主人', avatar: 'https://x/a~tplv.jpg' }, commentReplies: script.commentReplies || [], ...script })
-  const im = imMod.createFakeImClient({
-    loggedIn: imScript.loggedIn !== false && !imScript.needLogin,
-    needLogin: !!imScript.needLogin,
-    failSend: !!imScript.failSend,
-    failMessage: imScript.failMessage,
-    inbox: imScript.inbox || script.inbox || [],
-    owner: { uid: 'owner_uid', secUid: 'owner_sec', nickname: '主人' },
-    peers: imScript.peers || [{ uid: 'peer1', secUid: 'MS4wLjABAAAAabcdefghijklmnopqrs', nickname: '路人' }],
-    ...imScript,
-  })
-  const turns = []
+  const events = []
+  const prompts = []
   const hub = {
-    turns,
-    runSystemTurn: async (name, title, prompt, opts) => {
-      turns.push({ name, title, prompt, opts: opts || {} })
-      if (prompt.includes('看完说说你的想法')) return JSON.stringify(decisions)
-      if (prompt.includes('私信给你') || prompt.includes('发的私信')) return script.dmReplyText || '收到啦'
-      if (prompt.includes('回你的评论')) return script.replyText || '哈哈是呀'
-      return ''
-    },
-    sendText: async (chatId, text) => sent.push({ chatId, text }),
-    logChat: () => {},
+    runSystemTurn: async (name, title, prompt) => { prompts.push(prompt); return turn && name === 'douyin-dm' ? turn(prompt) : JSON.stringify(decisions) },
+    sendText: async (chatId, text) => { sent.push([chatId, text]) },
+    pushToSession: async (chat, content) => { pushed.push([chat.chatId, content[0].text]) },
   }
-  const memory = {
-    list: () => [],
-    recentEvents: () => [],
-    addEvent: (e) => events.push(e.text),
-    add: (m) => facts.push(m.text),
-  }
-  const base = normalize({
-    enabled: true, dryRun, ownerQQ: '10000001', ownerName: '主人',
-    douyin: {
-      enabled: true, perRun: 2, maxWatchPerDay: 30, maxRunsPerDay: 3, intervalHours: 4,
-      dwellMin: 8, dwellMax: 40,
-      socialInterruptBrowse: true,
-      caps: { like: 30, comment: 1, replyComment: 6, follow: 5, dm: 5, shareOwner: 3, dmReply: 20 },
-      gate: { maxWritesPerDay: 60, minWriteGapSec: 0, newAccountDays: 3 },
-      owner: { input: 'owner_id', secUid: 'owner_sec', uid: 'owner_uid', nickname: '主人', avatar: 'https://x/a', confirmedInput: 'owner_id' },
-      ...cfgOver,
-    },
-    profilePerms: Object.fromEntries(DOUYIN_PERM_KEYS.map((k) => [k, 'owner'])),
-  })
-  if (cfgOver.gate) base.douyin.gate = { ...base.douyin.gate, ...cfgOver.gate }
-  if (cfgOver.caps) base.douyin.caps = { ...base.douyin.caps, ...cfgOver.caps }
-  if (cfgOver.owner) base.douyin.owner = { ...base.douyin.owner, ...cfgOver.owner }
-  const dataFile = join(process.env.AURABOT_DATA_DIR, `douyin-${Math.random().toString(16).slice(2)}.json`)
-  const d = duty.createDouyin({
-    getConfig: () => base,
-    hub, memory,
-    log: { info() {}, warn() {}, debug() {} },
-    driver: drv,
-    im,
-    dataFile,
-  })
-  return { d, drv, im, hub, events, facts, sent, cfg: base, dataFile }
+  const pushed = []
+  const memory = { addEvent: (e) => events.push(e.text), add: (m) => events.push('记住:' + m.text) }
+  const cfg = normalize({ enabled: true, dryRun: false, ownerQQ: '10000001', ...cfgOver, douyin: { enabled: true, perRun: 3, dwellMin: 3, dwellMax: 3, caps: { like: 30, comment: 1, share: 5 }, gate: { minWriteGapSec: 0, newAccountDays: 0 }, ...(owner ? { owner } : {}), ...douyinOver } })
+  const fs = fakeSite({ feed: [aweme('7000000000000000001'), aweme('7000000000000000002', { is_ads: true }), aweme('7000000000000000003'), aweme('7000000000000000004')], ...siteOpts })
+  const waits = []
+  const owners = []
+  const dy = duty.createDouyin({ getConfig: () => cfg, setOwner: (o) => { owners.push(o); cfg.douyin.owner = o }, hub, memory, log: { info() {}, warn() {}, debug() {} }, site: fs, wait: async (ms) => { waits.push(ms); onWait(ms) }, ...(now ? { now } : {}) })
+  return { dy, fs, sent, events, prompts, cfg, waits, owners, pushed }
 }
 
-test('刷一轮：看视频、按每天上限评论 / 点赞（关注不在刷流），记成她的经历', async () => {
-  const { d, drv, events } = fakes({ decisions: [
-    { i: 1, feeling: '猫砂好用', like: true, comment: '学到了', follow: true, share: '', remember: '有个猫砂测评' },
-    { i: 2, feeling: '狗好快', like: true, comment: '跑得好快', follow: false, share: '', remember: '' },
+test('刷一轮：一个个点开看，按视频 id 点赞 / 评论（不会点到别的视频上），在 QQ 上分享给主人，记成她的经历', async () => {
+  const { dy, fs, sent, events, prompts } = setup({ decisions: [
+    { i: 1, feeling: '好可爱', like: true, comment: '猫猫会开门了', share: '', remember: '' },
+    { i: 2, feeling: '一般', like: false, comment: '', share: '' },
+    { i: 3, feeling: '笑死', like: true, comment: '哈哈哈', share: '主人你看这个', remember: '有只猫叫大橘' },
   ] })
-  const r = await d.run({ force: true })
+  const r = await dy.run({ force: true })
   assert.equal(r.ok, true, r.message)
-  assert.equal(r.watched, 2)
-  assert.equal(drv._state.liked.filter(Boolean).length, 2)
-  assert.equal(drv._state.commented.length, 1, '每天最多 1 条评论')
-  assert.equal(drv._state.commented[0], '学到了')
-  assert.equal(drv._state.followed.length, 0, '刷流不自动关注')
-  assert.ok(events.some((e) => e.includes('在抖音看了') && e.includes('阿猫')))
-  assert.equal(d.state().comment, 1)
-  assert.equal(d.state().like, 2)
-  const r2 = await d.run({ force: true })
-  assert.equal(r2.ok, true)
-  assert.equal(r2.watched, 1, '只剩第三条')
+  assert.deepEqual(fs.calls.watch, ['7000000000000000001', '7000000000000000003', '7000000000000000004'], '广告跳过，其余都真的点开看了')
+  assert.deepEqual(fs.calls.like, ['7000000000000000001', '7000000000000000004'], '点赞落在她说要赞的那个视频上')
+  assert.deepEqual(fs.calls.comment, [['7000000000000000001', '猫猫会开门了']], '评论每天上限 1 条')
+  assert.deepEqual(sent, [['private:10000001', '主人你看这个\nhttps://www.douyin.com/video/7000000000000000004']])
+  assert.match(prompts[0], /内容摘要|分类：动物/)
+  assert.match(prompts[0], /最多点赞 30 个、评论 1 个、分享 5 个/)
+  assert.ok(events.some((e) => /在抖音看了 作者7000000000000000001 的《视频7000000000000000001》：好可爱/.test(e)))
+  assert.ok(events.includes('记住:有只猫叫大橘'))
+  const st = dy.state()
+  assert.equal(st.watched, 3)
+  assert.equal(st.like, 2)
+  assert.equal(st.comment, 1)
+  assert.equal(st.share, 1)
+  assert.equal(st.runs, 0, '手动刷不占每天的轮数')
+  assert.equal(st.history[0].kind, 'share')
+  // 看过的不再看
+  fs.calls.feed = 0
+  const again = await dy.run({ force: true })
+  assert.equal(again.ok, false)
+  assert.match(again.message, /没刷到新视频/)
 })
 
-test('试运行：只记日志不真点，且不占真实日上限', async () => {
-  const { d, drv, im } = fakes({ dryRun: true, decisions: [
-    { i: 1, feeling: '好', like: true, comment: '评一下', follow: true, share: '给你看', remember: '' },
-  ] })
-  const r = await d.run({ force: true })
+test('刷一轮：试运行不真点、不占次数；已经赞过的不算次数', async () => {
+  const dry = setup({ cfgOver: { dryRun: true }, decisions: [{ i: 1, like: true, comment: '好' }] })
+  await dry.dy.run({ force: true })
+  assert.equal(dry.fs.calls.like.length, 0)
+  assert.equal(dry.fs.calls.comment.length, 0)
+  assert.equal(dry.dy.state().like, 0)
+  assert.equal(dry.dy.state().history.filter((x) => x.kind.startsWith('dry:')).length, 2)
+
+  const al = setup({ decisions: [{ i: 1, like: true }], siteOpts: { liked: new Set(['7000000000000000001']) } })
+  await al.dy.run({ force: true })
+  assert.equal(al.fs.calls.like.length, 1)
+  assert.equal(al.dy.state().like, 0)
+})
+
+test('刷一轮：两次点赞 / 评论之间等够间隔再点', async () => {
+  let clock = Date.now()
+  const { dy, fs, waits } = setup({ now: () => clock, onWait: (ms) => { clock += ms }, douyinOver: { gate: { minWriteGapSec: 20, newAccountDays: 0 } }, decisions: [{ i: 1, like: true }, { i: 2, like: true }] })
+  await dy.run({ force: true })
+  assert.equal(fs.calls.like.length, 2)
+  assert.ok(waits.some((ms) => ms >= 20000), '第二次点赞前等了 20 秒以上')
+})
+
+test('点赞遇到验证码 / 操作频繁：当天停手、只通知主人一次，还能接着看', async () => {
+  const err = Object.assign(new Error('要验证：请完成安全验证'), { code: 'verify' })
+  const { dy, fs, sent } = setup({ siteOpts: { likeError: err }, decisions: [{ i: 1, like: true }, { i: 2, like: true }, { i: 3, like: true }] })
+  const r = await dy.run({ force: true })
   assert.equal(r.ok, true)
-  assert.equal(drv._state.liked.filter(Boolean).length, 0)
-  assert.equal(drv._state.commented.length, 0)
-  assert.equal(drv._state.followed.length, 0)
-  assert.equal(im._state.shared.length, 0, '试运行不走 IM 分享')
-  assert.equal(im._state.sent.length, 0)
-  assert.equal(d.state().like, 0, '试运行不占 like 计数')
-  assert.equal(d.state().comment, 0, '试运行不占 comment 计数')
-  assert.equal(d.state().shareOwner, 0)
-  assert.equal(d.state().writes, 0, '试运行不占写操作总闸')
+  assert.equal(fs.calls.watch.length, 3)
+  const st = dy.state()
+  assert.match(st.pauseReason, /验证/)
+  assert.equal(sent.filter(([, t]) => /要验证/.test(t)).length, 1)
+  assert.equal(st.history.filter((x) => x.kind === 'error').length, 1, '停手后后面的不再去点')
+  // 主人让她点赞也会被挡
+  const w = await dy.likeVideo('https://www.douyin.com/video/7000000000000000009')
+  assert.equal(w.ok, false)
+  assert.match(w.message, /暂停/)
 })
 
-test('分享给主人：要已核对 sec_uid；改了输入就不再认；走 IM shareWork', async () => {
-  const { d, im } = fakes({ decisions: [
-    { i: 1, feeling: '好玩', like: false, comment: '', follow: false, share: '主人看这个猫', remember: '' },
+test('页面有验证码 / 没登录：这一轮不刷，原因写进状态', async () => {
+  const v = setup({ siteOpts: { verify: '请完成安全验证' } })
+  const r = await v.dy.run({ force: true })
+  assert.equal(r.ok, false)
+  assert.match(v.dy.state().lastSkipReason, /要验证/)
+  assert.equal(v.fs.calls.watch.length, 0)
+  const l = setup({ siteOpts: { loggedIn: false } })
+  const r2 = await l.dy.run({ force: true })
+  assert.match(r2.message, /还没登录/)
+  assert.equal(l.dy.state().account.loggedIn, false)
+})
+
+test('#4 打开面板不启动浏览器：state() 和不 force 的 account() 都只读文件', async () => {
+  const { dy, fs } = setup()
+  dy.state()
+  assert.deepEqual(await dy.account(), { loggedIn: false, unknown: true })
+  assert.equal(fs.calls.ensure, 0)
+  await dy.account(true)
+  assert.equal(fs.calls.ensure, 1, '点「检查登录」才去开')
+  assert.equal(dy.state().account.nickname, '她的小号')
+})
+
+test('主人让她看 / 点赞 / 评论某个视频：短链也行；新号前几天上限减半', async () => {
+  const { dy, fs } = setup({ douyinOver: { caps: { like: 30, comment: 3, share: 5 }, gate: { minWriteGapSec: 0, newAccountDays: 3 } } })
+  const w = await dy.watch('看看 https://www.douyin.com/video/7000000000000000007')
+  assert.equal(w.ok, true)
+  assert.match(w.message, /《视频7000000000000000007》/)
+  assert.match(w.message, /热评/)
+  assert.equal((await dy.watch('没链接')).ok, false)
+  assert.equal((await dy.likeVideo('https://www.douyin.com/video/7000000000000000007')).ok, true)
+  assert.deepEqual(fs.calls.like, ['7000000000000000007'])
+  assert.equal((await dy.commentVideo('https://www.douyin.com/video/7000000000000000007', '  ')).ok, false)
+  assert.equal(dy.state().caps.comment, 1, '新号：评论 3 → 1')
+  assert.equal((await dy.commentVideo('https://www.douyin.com/video/7000000000000000007', '第一条')).ok, true)
+  const r = await dy.commentVideo('https://www.douyin.com/video/7000000000000000007', '第二条')
+  assert.equal(r.ok, false)
+  assert.match(r.message, /次数用完/)
+})
+
+test('扫码登录：没登录给登录弹窗截图；扫完记下账号', async () => {
+  const { dy } = setup()
+  const a = await dy.loginStep(true)
+  assert.equal(a.loggedIn, false)
+  assert.match(a.shot, /^data:image\/png/)
+  const b = await dy.loginStep(false)
+  assert.equal(b.loggedIn, true)
+  assert.match(b.message, /她的小号/)
+  assert.equal(dy.state().account.loggedIn, true)
+})
+
+test('定时：醒着、到点才刷；刷完排下一轮；没打开 / 关了定时不刷', async () => {
+  let t = new Date(2026, 9, 28, 10, 0, 0).getTime()
+  const { dy, fs, cfg } = setup({ now: () => t })
+  cfg.speakUp.awakeFrom = 8
+  cfg.speakUp.awakeTo = 23
+  await dy.tick()
+  assert.equal(fs.calls.watch.length, 3, '第一次到点就刷')
+  const st = dy.state()
+  assert.equal(st.runs, 1)
+  assert.ok(st.nextDueAt >= t + 4 * 3600_000 * 0.8, '下一轮排在约 4 小时后')
+  fs.calls.feed = 0
+  await dy.tick()
+  assert.equal(fs.calls.feed, 0, '没到点不刷')
+  t = new Date(2026, 9, 28, 23, 30, 0).getTime()
+  cfg.douyin.autoBrowse = true
+  await dy.tick()
+  assert.equal(fs.calls.feed, 0, '睡觉时间不刷')
+})
+
+const OWNER = { input: 'master01', secUid: 'MS4wOWNER', uid: '4182', nickname: '主人小号', confirmedInput: 'master01' }
+
+test('评论里真·@主人：她自己决定 @ 谁；手打的 @ 去掉；用 sec_uid 现查的昵称去 @；占评论次数也单独计数', async () => {
+  const { dy, fs, prompts, events } = setup({ owner: OWNER, douyinOver: { caps: { like: 30, comment: 3, share: 5, atOwner: 1 } }, decisions: [
+    { i: 1, comment: '@主人 你快看这个猫', at: true },
+    { i: 2, comment: '这个也想让你看', at: true },
+    { i: 3, comment: '普通评论' },
   ] })
-  await d.run({ force: true })
-  assert.equal(im._state.shared.length, 1)
-  assert.equal(im._state.shared[0].secUid, 'owner_sec')
-  assert.equal(im._state.shared[0].uid, 'owner_uid')
-  assert.equal(im._state.shared[0].itemId, '1001')
-
-  const { d: d2, im: im2 } = fakes({
-    decisions: [{ i: 1, feeling: '好玩', like: false, comment: '', follow: false, share: '主人看', remember: '' }],
-    cfgOver: { owner: { input: 'changed', secUid: 'owner_sec', uid: 'owner_uid', nickname: '主人', avatar: 'https://x/a', confirmedInput: 'owner_id' } },
-  })
-  await d2.run({ force: true })
-  assert.equal(im2._state.shared.length, 0, '输入和核对时不一致 → 不分享')
+  const r = await dy.run({ force: true })
+  assert.equal(r.ok, true, r.message)
+  assert.match(prompts[0], /"at":true\/false/)
+  assert.match(prompts[0], /真的 @主人/)
+  assert.match(prompts[0], /最多 @ 1 次/)
+  assert.deepEqual(fs.calls.comment, [
+    ['7000000000000000001', '你快看这个猫', { secUid: 'MS4wOWNER', uid: '4182', nickname: '主人的新昵称' }],
+    ['7000000000000000003', '这个也想让你看'],
+    ['7000000000000000004', '普通评论'],
+  ], '只 @ 了 1 次（上限 1），第二条照常评论但不 @；手打的「@主人」被去掉')
+  const st = dy.state()
+  assert.equal(st.atOwner, 1)
+  assert.equal(st.comment, 3)
+  assert.ok(st.history.some((x) => x.kind === 'comment' && x.atOwner))
+  assert.match(r.message, /@了主人 1 次/)
+  assert.ok(events.some((e) => /评论（@了主人）：你快看这个猫/.test(e)))
 })
 
-test('回主人私信：只认 confirmed sec_uid；列表没身份就不开；超过 30 分钟不理', async () => {
-  const now = Date.now()
-  const { d, im } = fakes({
-    decisions: [],
-    imScript: { inbox: [
-      { secUid: 'owner_sec', uid: 'owner_uid', nickname: '主人', text: '在干嘛', at: now },
-      { secUid: 'other', uid: 'other_uid', nickname: '路人', text: '嗨', at: now },
-    ] },
-  })
-  const r = await d.checkOwnerDms()
-  assert.equal(r.replied, 1, r.message)
-  assert.equal(im._state.sent.length, 1)
-  assert.equal(im._state.sent[0].text, '收到啦')
-
-  const { d: d2 } = fakes({
-    decisions: [],
-    imScript: { inbox: [{ secUid: '', uid: '', nickname: '？', text: '嗨', at: now }] },
-  })
-  const r2 = await d2.checkOwnerDms()
-  assert.equal(r2.ok, false)
-  assert.match(r2.message, /认不出/)
-
-  const { d: d3, im: im3 } = fakes({
-    decisions: [],
-    imScript: { inbox: [{ secUid: 'owner_sec', uid: 'owner_uid', nickname: '主人', text: '很久以前', at: now - 40 * 60_000 }] },
-  })
-  const r3 = await d3.checkOwnerDms()
-  assert.equal(r3.replied, 0, '超过 30 分钟的私信不理')
-  assert.equal(im3._state.sent.length, 0)
+test('没核对主人抖音号 / 输入改过没重新核对：不提 @、不 @', async () => {
+  for (const owner of [undefined, { ...OWNER, input: 'changed' }]) {
+    const { dy, fs, prompts } = setup({ owner, decisions: [{ i: 1, comment: '好看', at: true }] })
+    await dy.run({ force: true })
+    assert.doesNotMatch(prompts[0], /"at"/)
+    assert.deepEqual(fs.calls.comment, [['7000000000000000001', '好看']])
+  }
 })
 
-test('回主人私信：连续 3 条后若主人没新话就停', async () => {
-  const now = Date.now()
-  const inbox = [
-    { secUid: 'owner_sec', uid: 'owner_uid', nickname: '主人', text: '一', at: now },
-    { secUid: 'owner_sec', uid: 'owner_uid', nickname: '主人', text: '二', at: now },
-    { secUid: 'owner_sec', uid: 'owner_uid', nickname: '主人', text: '三', at: now },
-    { secUid: 'owner_sec', uid: 'owner_uid', nickname: '主人', text: '四', at: now },
+test('@ 不上主人：这条评论不发（不发假 @），也不当成风控停手', async () => {
+  const { dy, fs } = setup({ owner: OWNER, siteOpts: { mentionFails: true }, douyinOver: { caps: { like: 30, comment: 3, share: 5, atOwner: 3 } }, decisions: [{ i: 1, comment: '快看', at: true }, { i: 2, comment: '普通的' }] })
+  await dy.run({ force: true })
+  assert.deepEqual(fs.calls.comment, [['7000000000000000003', '普通的']])
+  const st = dy.state()
+  assert.equal(st.pauseReason, '')
+  assert.ok(st.history.some((x) => x.kind === 'error' && /没找到主人/.test(x.text)))
+})
+
+test('核对主人抖音号：抖音号 / 主页链接都行，查到后写进配置；乱填的不查', async () => {
+  const { dy, owners } = setup()
+  const a = await dy.confirmOwner('master01')
+  assert.equal(a.ok, true, a.message)
+  assert.deepEqual(owners[0], { input: 'master01', secUid: 'MS4wOWNER', uid: '4182', nickname: '主人小号', confirmedInput: 'master01' })
+  const b = await dy.confirmOwner('https://www.douyin.com/user/MS4wABCdef-123?from=x')
+  assert.equal(b.ok, true)
+  assert.equal(owners[1].secUid, 'MS4wABCdef-123')
+  assert.equal((await dy.confirmOwner('nobody')).ok, false)
+  assert.equal((await dy.confirmOwner('有空格 的')).ok, false)
+  assert.equal(dy.state().owner.nickname, '主人的新昵称')
+})
+
+test('配置：主人抖音号保留；面板保存只能改输入框，改不了 secUid', () => {
+  const cur = normalize({ douyin: { owner: OWNER } })
+  assert.deepEqual(cur.douyin.owner, OWNER)
+  const next = mergeFromPanel(cur, { douyin: { owner: { input: 'other', secUid: 'MS4wHACK', nickname: 'x' } } })
+  assert.equal(next.douyin.owner.input, 'other')
+  assert.equal(next.douyin.owner.secUid, 'MS4wOWNER')
+  assert.equal(next.douyin.owner.nickname, '主人小号')
+})
+
+test('分享给主人：默认在抖音里私信分享（按 sec_uid 认人）；抖音发不出去改发 QQ；也可以两边都发 / 只发 QQ', async () => {
+  const decisions = [{ i: 1, share: '主人看这个' }]
+  const dy = setup({ owner: OWNER, decisions })
+  await dy.dy.run({ force: true })
+  assert.deepEqual(dy.fs.calls.share, [['7000000000000000001', 'MS4wOWNER', '主人的新昵称']])
+  assert.deepEqual(dy.sent, [], '抖音发成了就不再发 QQ')
+  assert.deepEqual(dy.dy.state().history.find((x) => x.kind === 'share').via, ['douyin'])
+  assert.equal(dy.dy.state().share, 1)
+
+  // 同一个视频不会在抖音里分享第二次
+  dy.fs.calls.feed = 0
+  await dy.dy.run({ force: true })
+  assert.equal(dy.fs.calls.share.length, 1)
+
+  const fail = setup({ owner: OWNER, decisions, siteOpts: { shareFails: true } })
+  await fail.dy.run({ force: true })
+  assert.deepEqual(fail.sent, [['private:10000001', '主人看这个\nhttps://www.douyin.com/video/7000000000000000001']])
+  assert.ok(fail.dy.state().history.some((x) => x.kind === 'error' && /改发 QQ/.test(x.text)))
+  assert.deepEqual(fail.dy.state().history.find((x) => x.kind === 'share').via, ['qq'])
+
+  const both = setup({ owner: OWNER, decisions, douyinOver: { shareTo: 'both' } })
+  await both.dy.run({ force: true })
+  assert.equal(both.fs.calls.share.length, 1)
+  assert.equal(both.sent.length, 1)
+
+  const qq = setup({ owner: OWNER, decisions, douyinOver: { shareTo: 'qq' } })
+  await qq.dy.run({ force: true })
+  assert.equal(qq.fs.calls.share.length, 0)
+  assert.equal(qq.sent.length, 1)
+
+  const dry = setup({ owner: OWNER, decisions, cfgOver: { dryRun: true } })
+  await dry.dy.run({ force: true })
+  assert.equal(dry.fs.calls.share.length, 0, '试运行不真分享')
+})
+
+const until = async (fn, ms = 2000) => { const end = Date.now() + ms; while (!fn() && Date.now() < end) await new Promise((r) => setTimeout(r, 10)); return fn() }
+
+test('主人让她找视频：她一个都不分享也会自动挑一个（优先点了赞的）；刷完把结果告诉她，让她照实说', async () => {
+  const { dy, fs, pushed } = setup({ owner: OWNER, decisions: [{ i: 1, feeling: '一般' }, { i: 2, feeling: '这个不错', like: true }, { i: 3 }] })
+  const chat = { chatId: 'private:10000001', kind: 'private', userId: '10000001' }
+  const r = dy.browse({ ownerAsked: true, report: chat })
+  assert.equal(r.ok, true)
+  assert.match(r.message, /别跟对方说「已经发了」/)
+  assert.ok(await until(() => pushed.length), '刷完把结果送回聊天')
+  assert.deepEqual(fs.calls.share.map((x) => x[0]), ['7000000000000000003'], '挑了她点赞的那个')
+  assert.equal(pushed[0][0], 'private:10000001')
+  assert.match(pushed[0][1], /分享给主人的：《视频7000000000000000003》（发到了抖音私信）/)
+  assert.match(pushed[0][1], /别说没做到的事/)
+})
+
+test('自己刷 / 主人没开口：不强行分享；刷完也会照实说「没有分享」', async () => {
+  const { dy, fs, pushed, prompts } = setup({ owner: OWNER, decisions: [{ i: 1 }, { i: 2 }] })
+  dy.browse({ report: { chatId: 'group:5', kind: 'group' } })
+  assert.ok(await until(() => pushed.length))
+  assert.equal(fs.calls.share.length, 0)
+  assert.match(pushed[0][1], /这轮没有分享给主人的视频/)
+  assert.doesNotMatch(prompts[0], /至少挑一个/)
+})
+
+test('抖音私信：第一次只记下旧消息不回；之后只回主人的新消息；回复里带 [去刷抖音] 就去刷一轮', async () => {
+  let t = Date.now()
+  const chat = [
+    { id: 'm1', uid: '4182', text: '昨天的话', at: t - 3600_000 },
+    { id: 'm2', uid: '999', text: '我是路人', at: t - 1000 },
   ]
-  const { d } = fakes({ decisions: [], imScript: { inbox } })
-  const r = await d.checkOwnerDms()
-  assert.equal(r.replied, 3, '最多连回 3 条')
-  assert.equal(d.state().dmReply, 3)
-})
-
-test('推荐页：裸 recommend=1 跳 jingxuan 后 from_nav / 点推荐可恢复', async () => {
-  const drv = cdp.createFakeDriver({ redirectRecommendToJingxuan: true })
-  await drv.navigate('https://www.douyin.com/?recommend=1')
-  assert.equal(await drv.currentUrl(), 'https://www.douyin.com/jingxuan')
-  assert.equal(util.isRecommendUrl(await drv.currentUrl()), false)
-
-  const ok = await drv.ensureRecommend()
-  assert.equal(ok.ok, true, ok.message)
-  assert.ok(util.isRecommendUrl(ok.url))
-  assert.match(ok.url, /from_nav=1/)
-  assert.ok(drv._state.log.some((x) => x[0] === 'nav' && String(x[1]).includes('from_nav=1')))
-})
-
-test('推荐页：from_nav 仍 jingxuan 时点侧栏推荐可恢复', async () => {
-  const drv = cdp.createFakeDriver({ redirectRecommendToJingxuan: true, fromNavStaysJingxuan: true })
-  await drv.navigate('https://www.douyin.com/?recommend=1')
-  assert.match(await drv.currentUrl(), /jingxuan/)
-  const ok = await drv.ensureRecommend()
-  assert.equal(ok.ok, true, ok.message)
-  assert.ok(util.isRecommendUrl(ok.url))
-  assert.ok(drv._state.log.some((x) => x[0] === 'clickRecommendTab'))
-})
-
-test('extractOwnerProfile：RENDER_DATA URL 编码与 html 均可抠出数字 uid', () => {
-  const sec = 'MS4wLjABAAAAabcdefghijklmnopqrs'
-  const payload = {
-    app: { user: { userInfo: { secUid: sec, uid: '135990228302301', nickname: '主人号' } } },
-  }
-  const encoded = encodeURIComponent(JSON.stringify(payload))
-  const fromRender = util.extractOwnerProfile({
-    href: `https://www.douyin.com/user/${sec}`,
-    renderData: encoded,
-  })
-  assert.equal(fromRender.secUid, sec)
-  assert.equal(fromRender.uid, '135990228302301')
-
-  const html = `noise "secUid":"${sec}" pad uid%22%3A%2211223344556677 more`
-  const fromHtml = util.extractOwnerProfile({ href: `https://www.douyin.com/user/${sec}`, html })
-  assert.equal(fromHtml.uid, '11223344556677')
-  assert.equal(util.normalizeOwnerUid('abc'), '')
-  assert.equal(util.normalizeOwnerUid('12345'), '12345')
-})
-
-test('extractOwnerProfile：不吃浏览器登录态整页 uid（须 secUid 匹配或窗口内）', () => {
-  const sec = 'MS4wLjABAAAAabcdefghijklmnopqrs'
-  // 整页靠前有登录态 uid，但没有匹配 secUid 的节点 / 窗口 → 不应认成主人 uid
-  const htmlFar = `"uid":"7675288911115453489" noise nowhere near target`
-  const far = util.extractOwnerProfile({ href: `https://www.douyin.com/user/${sec}`, html: htmlFar })
-  assert.equal(far.secUid, sec)
-  assert.equal(far.uid, '', '远离 secUid 的整页 uid 不能当主人')
-
-  // 同节点带匹配 secUid 才认
-  const payload = {
-    app: { user: { userInfo: { secUid: sec, uid: '33533115713', nickname: '_Future' } } },
-    self: { user: { userInfo: { secUid: 'OTHERSECUIDOTHERSECUIDXX', uid: '7675288911115453489', nickname: 'Next_Future' } } },
-  }
-  const fromRender = util.extractOwnerProfile({
-    href: `https://www.douyin.com/user/${sec}`,
-    renderData: encodeURIComponent(JSON.stringify(payload)),
-  })
-  assert.equal(fromRender.uid, '33533115713', '只认 secUid 匹配节点上的 uid')
-})
-
-test('#4 卡在精选：ensureRecommend 失败则本轮不刷', async () => {
-  const { d } = fakes({ decisions: [], script: { stuckOnFeatured: true } })
-  const r = await d.run({ force: true })
-  assert.equal(r.ok, false)
-  assert.match(r.message, /推荐页|精选/)
-  assert.equal(d.state().lastSkipReason.includes('推荐') || d.state().lastSkipReason.includes('精选'), true)
-})
-
-test('#4 计数立刻落盘：每个视频看完 watched 就 +1', async () => {
-  const { d, dataFile } = fakes({ decisions: [
-    { i: 1, feeling: '1', like: false, comment: '', follow: false, share: '', remember: '' },
-    { i: 2, feeling: '2', like: false, comment: '', follow: false, share: '', remember: '' },
-  ] })
-  await d.run({ force: true })
-  const { readFileSync } = await import('node:fs')
-  const saved = JSON.parse(readFileSync(dataFile, 'utf8'))
-  assert.equal(saved.watched, 2)
-  assert.ok(saved.seen.includes('1001') && saved.seen.includes('1002'))
-  assert.ok(saved.history.some((h) => h.kind === 'watch'))
-})
-
-test('#4 定时：nextDueAt 落盘；未到点 tick 不跑', async () => {
-  const { d, cfg } = fakes({ decisions: [
-    { i: 1, feeling: '好', like: false, comment: '', follow: false, share: '', remember: '' },
-  ] })
-  const r = await d.run({ force: false })
-  assert.equal(r.ok, true)
-  const st = d.state()
-  assert.ok(st.nextDueAt > Date.now(), '下次应在未来')
-  const runsBefore = st.runs
-  cfg.enabled = true
-  cfg.douyin.enabled = true
-  await d.tick()
-  assert.equal(d.state().runs, runsBefore, '没到点不该再跑')
-})
-
-test('风控：验证码时暂停全部写操作并只通知主人一次', async () => {
-  const { d, drv, sent } = fakes({ decisions: [
-    { i: 1, feeling: '好', like: true, comment: '', follow: false, share: '', remember: '' },
-  ] })
-  const orig = drv.clickLike
-  drv.clickLike = async () => { drv.markVerify('页面要验证'); throw new Error('请完成安全验证') }
-  await d.run({ force: true })
-  assert.ok(d.state().pauseReason)
-  assert.ok(sent.some((x) => /验证|限制/.test(x.text)))
-  // 再触发一次不应重复通知
-  const n = sent.length
-  drv.clickLike = orig
-  await d.run({ force: true })
-  assert.ok(d.state().pauseReason)
-  assert.equal(sent.length, n, '验证码只通知一次')
-})
-
-test('权限 off：browse 关掉后自动刷拒绝', async () => {
-  const { d, cfg } = fakes({ decisions: [] })
-  cfg.profilePerms.douyinBrowse = 'off'
-  const r = await d.run({ force: false })
-  assert.equal(r.ok, false)
-  assert.match(r.message, /权限|关掉/)
-})
-
-test('主动私信：每人每天最多 1 条；日上限仍生效', async () => {
-  const { d, im } = fakes({ decisions: [], cfgOver: { caps: { like: 0, comment: 0, replyComment: 0, follow: 0, dm: 5, shareOwner: 0, dmReply: 0 } } })
-  const a = await d.dmTo('https://www.douyin.com/user/MS4wLjABAAAAabcdefghijklmnopqrs', '你好呀')
-  assert.equal(a.ok, true, a.message)
-  const b = await d.dmTo('https://www.douyin.com/user/MS4wLjABAAAAabcdefghijklmnopqrs', '第二句')
-  assert.equal(b.ok, false)
-  assert.match(b.message, /每人每天|已经给这个人/)
-  assert.equal(im._state.sent.length, 1)
-  assert.equal(im._state.sent[0].text, '你好呀')
-})
-
-test('关注工具：刷流不关注，douyin_follow 才关注', async () => {
-  const { d, drv } = fakes({ decisions: [] })
-  const r = await d.followUser('https://www.douyin.com/user/MS4wLjABAAAAabcdefghijklmnopqrs')
-  assert.equal(r.ok, true, r.message)
-  assert.equal(d.state().follow, 1)
-  assert.ok(drv._state.followed.length >= 1 || drv._state.log.some((x) => x[0] === 'nav'))
-})
-
-test('回评论：走 listCommentReplies，不是只读 _state.commentReplies', async () => {
-  const { d, drv } = fakes({
-    decisions: [],
-    script: { commentReplies: [{ id: 'r1', name: '路人甲', text: '哈哈哈', awemeId: '1001' }] },
-  })
-  // 确认假驱动暴露的是方法
-  assert.equal(typeof drv.listCommentReplies, 'function')
-  const r = await d.checkCommentReplies()
+  let reply = '好呀等我\n[去刷抖音]'
+  const { dy, fs, prompts } = setup({ owner: OWNER, siteOpts: { chat }, now: () => t, turn: () => reply })
+  let r = await dy.checkOwnerDms()
+  assert.equal(r.replied, 0)
+  assert.match(r.message, /第一次/)
+  assert.equal(fs.calls.dmUid, '4182', '按核对过的主人 uid 打开会话')
+  // 路人的新消息不回
+  chat.push({ id: 'm3', uid: '999', text: '在吗', at: t })
+  assert.equal((await dy.checkOwnerDms()).replied, 0)
+  assert.equal(fs.calls.dm.length, 0)
+  // 主人发了分享卡片 + 一句话
+  chat.push({ id: 'm4', uid: '4182', text: '', at: t, card: { awemeId: '7', title: '猫猫' } }, { id: 'm5', uid: '4182', text: '再给我分享个视频呗', at: t })
+  r = await dy.checkOwnerDms()
   assert.equal(r.replied, 1)
-  assert.ok(drv._state.commented.includes('哈哈是呀'))
+  assert.deepEqual(fs.calls.dm, ['好呀等我'], '[去刷抖音] 标记不发出去')
+  const dmPrompt = prompts.find((p) => /抖音私信/.test(p))
+  assert.match(dmPrompt, /主人：\[分享了抖音视频《猫猫》\]/)
+  assert.match(dmPrompt, /你：|主人：再给我分享个视频呗/)
+  assert.ok(await until(() => fs.calls.watch.length === 3), '回完就去刷了一轮')
+  // 同一条不回第二次
+  reply = '嗯'
+  assert.equal((await dy.checkOwnerDms()).replied, 0)
+  assert.equal(dy.state().history.filter((x) => x.kind === 'dm').length, 1)
 })
 
-test('写操作总闸：总次数上限；连续失败 3 次禁用该 op', async () => {
-  const { d, drv } = fakes({
-    decisions: [],
-    cfgOver: { caps: { like: 30, comment: 0, replyComment: 0, follow: 0, dm: 0, shareOwner: 0, dmReply: 0 }, gate: { maxWritesPerDay: 2, minWriteGapSec: 0, newAccountDays: 0 } },
-  })
-  // 用 likeVideo 两次占满总闸
-  drv._state.feed = feed.map((x) => ({ ...x }))
-  // like via run
-  const { d: d2, drv: drv2 } = fakes({
-    decisions: [
-      { i: 1, feeling: 'a', like: true, comment: '', follow: false, share: '', remember: '' },
-      { i: 2, feeling: 'b', like: true, comment: '', follow: false, share: '', remember: '' },
-    ],
-    cfgOver: { perRun: 2, caps: { like: 30, comment: 0, replyComment: 0, follow: 0, dm: 0, shareOwner: 0, dmReply: 0 }, gate: { maxWritesPerDay: 1, minWriteGapSec: 0, newAccountDays: 0 } },
-  })
-  await d2.run({ force: true })
-  assert.equal(d2.state().like, 1, '总闸 1 时第二条点赞不该成功')
-  assert.equal(d2.state().writes, 1)
-
-  // 连续失败禁用
-  let fails = 0
-  const { d: d3, drv: drv3 } = fakes({
-    decisions: [{ i: 1, feeling: 'x', like: true, comment: '', follow: false, share: '', remember: '' }],
-    cfgOver: { perRun: 1, gate: { maxWritesPerDay: 60, minWriteGapSec: 0, newAccountDays: 0 } },
-  })
-  drv3.clickLike = async () => { fails++; throw new Error('点赞按钮丢了') }
-  // 需要多轮触发 3 次失败：每轮 perRun=1，feed 重置不了 cursor——换 followUser
-  const { d: d4, drv: drv4 } = fakes({ decisions: [], cfgOver: { gate: { minWriteGapSec: 0, newAccountDays: 0 } } })
-  drv4.clickFollow = async () => { throw new Error('找不到关注按钮') }
-  for (let i = 0; i < 3; i++) {
-    const rr = await d4.followUser('https://www.douyin.com/user/MS4wLjABAAAAabcdefghijklmnopqrs')
-    assert.equal(rr.ok, false)
-  }
-  const r4 = await d4.followUser('https://www.douyin.com/user/MS4wLjABAAAAabcdefghijklmnopqrs')
-  assert.equal(r4.ok, false)
-  assert.match(r4.message, /连续失败|停了/)
+test('抖音私信：没核对主人抖音号不看；定时按间隔看', async () => {
+  const none = setup()
+  assert.equal((await none.dy.checkOwnerDms()).ok, false)
+  let t = new Date(2026, 9, 28, 10, 0, 0).getTime()
+  const { dy, fs, cfg } = setup({ owner: OWNER, now: () => t, douyinOver: { autoBrowse: false, dmPollMinutes: 3 } })
+  cfg.speakUp.awakeFrom = 8
+  cfg.speakUp.awakeTo = 23
+  await dy.tick()
+  assert.equal(fs.calls.dms, 1)
+  t += 60_000
+  await dy.tick()
+  assert.equal(fs.calls.dms, 1, '没到 3 分钟不看')
+  t += 3 * 60_000
+  await dy.tick()
+  assert.equal(fs.calls.dms, 2)
 })
 
-test('写操作间隔：minWriteGapSec 内第二次写被拒', async () => {
-  let t = 1_700_000_000_000
-  const events = []
-  const sent = []
-  const drv = cdp.createFakeDriver({ feed: feed.map((x) => ({ ...x })) })
-  const base = normalize({
-    enabled: true, dryRun: false, ownerQQ: '10000001', ownerName: '主人',
-    douyin: {
-      enabled: true, perRun: 1, maxWatchPerDay: 30, maxRunsPerDay: 3, intervalHours: 4,
-      dwellMin: 8, dwellMax: 40,
-      caps: { like: 30, comment: 0, replyComment: 0, follow: 5, dm: 0, shareOwner: 0, dmReply: 0 },
-      gate: { maxWritesPerDay: 60, minWriteGapSec: 20, newAccountDays: 0 },
-      owner: { input: 'owner_id', secUid: 'owner_sec', nickname: '主人', avatar: 'https://x/a', confirmedInput: 'owner_id' },
-    },
-    profilePerms: Object.fromEntries(DOUYIN_PERM_KEYS.map((k) => [k, 'owner'])),
-  })
-  const dataFile = join(process.env.AURABOT_DATA_DIR, `douyin-gap-${Math.random().toString(16).slice(2)}.json`)
-  const d = duty.createDouyin({
-    getConfig: () => base,
-    hub: { runSystemTurn: async () => '', sendText: async (c, t) => sent.push({ c, t }), logChat() {} },
-    memory: { list: () => [], recentEvents: () => [], addEvent: (e) => events.push(e.text), add() {} },
-    log: { info() {}, warn() {}, debug() {} },
-    driver: drv,
-    dataFile,
-    now: () => t,
-  })
-  const a = await d.followUser('https://www.douyin.com/user/MS4wLjABAAAAabcdefghijklmnopqrs')
-  assert.equal(a.ok, true, a.message)
-  t += 5_000 // 只过 5 秒
-  const b = await d.followUser('https://www.douyin.com/user/MS4wLjABAAAAzzzzzzzzzzzzzzzzz')
-  assert.equal(b.ok, false)
-  assert.match(b.message, /再等|写太勤/)
-  t += 20_000
-  const c = await d.followUser('https://www.douyin.com/user/MS4wLjABAAAAzzzzzzzzzzzzzzzzz')
-  assert.equal(c.ok, true, c.message)
-})
-
-test('feed 整理：广告 / 直播丢掉', () => {
-  assert.equal(util.normalizeAweme({ aweme_id: '1', is_ads: true }), null)
-  assert.equal(util.normalizeAweme({ aweme_id: '2', cell_room: {} }), null)
-  const v = util.normalizeAweme({ aweme_id: '3', desc: 'hi', author: { nickname: 'x', sec_uid: 's' }, statistics: { digg_count: 9 } })
-  assert.equal(v.awemeId, '3')
-  assert.equal(v.likes, 9)
-  assert.deepEqual(util.awemesFromResponse({ aweme_list: [{ aweme_id: '3', desc: 'hi', author: {}, statistics: {} }] }).map((x) => x.awemeId), ['3'])
-})
-
-test('过滤器：昵称 / 签名拒链接、手机、广告、超长', () => {
-  assert.equal(util.filterNickname('肥鱼').ok, true)
-  assert.equal(util.filterNickname('').ok, false)
-  assert.equal(util.filterNickname('https://x.com').ok, false)
-  assert.equal(util.filterNickname('加微信领券').ok, false)
-  assert.equal(util.filterNickname('1'.repeat(21)).ok, false)
-  assert.equal(util.filterSignature('今天心情好').ok, true)
-  assert.equal(util.filterSignature('加v私聊').ok, false)
-  assert.equal(util.filterSignature('a'.repeat(101)).ok, false)
-})
-
-test('头像来源：last / http / 白名单本地；域外本地拒', () => {
-  const root = process.env.AURABOT_DATA_DIR
-  const inside = join(root, 'pic.png')
-  assert.equal(util.resolveAvatarSource('last', '').ok, false)
-  assert.equal(util.resolveAvatarSource('last', 'https://cdn/a.jpg').url, 'https://cdn/a.jpg')
-  assert.equal(util.resolveAvatarSource('https://cdn/b.png', '').url, 'https://cdn/b.png')
-  assert.equal(util.resolveAvatarSource(inside, '', [root]).path, inside)
-  assert.equal(util.resolveAvatarSource('/tmp/evil.png', '', [root]).ok, false)
-  const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-  assert.equal(util.sniffImageType(png), 'image/png')
-})
-
-test('改签名 / 昵称：过写闸、日上限、同日重复拒、试运行不计次', async () => {
-  const { d, drv, events, cfg } = fakes({
-    decisions: [],
-    cfgOver: { caps: { like: 0, comment: 0, replyComment: 0, follow: 0, dm: 0, shareOwner: 0, dmReply: 0, sign: 2, nickname: 2, avatar: 1 }, gate: { maxWritesPerDay: 60, minWriteGapSec: 0, newAccountDays: 0 } },
-  })
-  const a = await d.setSign('今天开心')
-  assert.equal(a.ok, true, a.message)
-  assert.equal(drv._state.signature, '今天开心')
-  assert.ok(events.some((t) => t.includes('签名')))
-  const dup = await d.setSign('今天开心')
-  assert.equal(dup.ok, false)
-  assert.match(dup.message, /已经改成/)
-  const b = await d.setSign('换一句')
-  assert.equal(b.ok, true, b.message)
-  const c = await d.setSign('第三句')
-  assert.equal(c.ok, false)
-  assert.match(c.message, /用完|次数/)
-
-  const n1 = await d.setNickname('小肥鱼')
-  assert.equal(n1.ok, true, n1.message)
-  assert.equal(drv._state.self.nickname, '小肥鱼')
-  const n2 = await d.setNickname('小肥鱼')
-  assert.equal(n2.ok, false)
-  const n3 = await d.setNickname('大肥鱼')
-  assert.equal(n3.ok, true, n3.message)
-  const n4 = await d.setNickname('超肥鱼')
-  assert.equal(n4.ok, false)
-
-  // dryRun 不计次
-  const { d: d2, drv: drv2 } = fakes({
-    decisions: [], dryRun: true,
-    cfgOver: { caps: { sign: 1, nickname: 1, avatar: 1, like: 0, comment: 0, replyComment: 0, follow: 0, dm: 0, shareOwner: 0, dmReply: 0 }, gate: { maxWritesPerDay: 60, minWriteGapSec: 0, newAccountDays: 0 } },
-  })
-  const dry = await d2.setSign('试运行签名')
-  assert.equal(dry.ok, true)
-  assert.match(dry.message, /试运行/)
-  assert.equal(drv2._state.signature, '')
-  const st = d2.state()
-  assert.equal(st.sign, 0)
-})
-
-test('换头像：MIME 嗅探、日上限 1、验证码 pauseAll', async () => {
-  const root = process.env.AURABOT_DATA_DIR
-  const pngPath = join(root, 'avatar-ok.png')
-  const { writeFileSync } = await import('node:fs')
-  writeFileSync(pngPath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1, 2, 3]))
-  const { d, drv } = fakes({
-    decisions: [],
-    cfgOver: { caps: { avatar: 1, sign: 0, nickname: 0, like: 0, comment: 0, replyComment: 0, follow: 0, dm: 0, shareOwner: 0, dmReply: 0 }, gate: { maxWritesPerDay: 60, minWriteGapSec: 0, newAccountDays: 0 } },
-  })
-  const a = await d.setAvatar(pngPath)
-  assert.equal(a.ok, true, a.message)
-  assert.equal(drv._state.avatarPath, pngPath)
-  const b = await d.setAvatar(pngPath)
-  assert.equal(b.ok, false)
-  assert.match(b.message, /用完|次数/)
-
-  const bad = join(root, 'not-img.bin')
-  writeFileSync(bad, Buffer.from('hello'))
-  const { d: d3 } = fakes({
-    decisions: [],
-    cfgOver: { caps: { avatar: 1, like: 0, comment: 0, replyComment: 0, follow: 0, dm: 0, shareOwner: 0, dmReply: 0 }, gate: { maxWritesPerDay: 60, minWriteGapSec: 0, newAccountDays: 0 } },
-  })
-  const rBad = await d3.setAvatar(bad)
-  assert.equal(rBad.ok, false)
-  assert.match(rBad.message, /图片/)
-
-  const { d: d4, drv: drv4, sent } = fakes({
-    decisions: [],
-    script: { profileFail: true, profileFailMessage: '请完成安全验证' },
-    cfgOver: { caps: { avatar: 1, like: 0, comment: 0, replyComment: 0, follow: 0, dm: 0, shareOwner: 0, dmReply: 0 }, gate: { maxWritesPerDay: 60, minWriteGapSec: 0, newAccountDays: 0 } },
-  })
-  const rV = await d4.setAvatar(pngPath)
-  assert.equal(rV.ok, false)
-  assert.ok(d4.state().pauseReason)
-  assert.equal(sent.length, 1)
-})
-
-
-test('IM：未登录时 douyin_dm / share / 回主人私信明确提示，不静默失败', async () => {
-  const { d } = fakes({ decisions: [], imScript: { needLogin: true } })
-  const a = await d.dmTo('https://www.douyin.com/user/MS4wLjABAAAAabcdefghijklmnopqrs', '你好')
-  assert.equal(a.ok, false)
-  assert.match(a.message, /IM|登录/)
-  const b = await d.shareToOwner('https://www.douyin.com/video/1001', '看')
-  assert.equal(b.ok, false)
-  assert.match(b.message, /IM|登录/)
-  const c = await d.checkOwnerDms()
-  assert.equal(c.ok, false)
-  assert.match(c.message, /IM|登录/)
-})
-
-test('IM：dryRun 私信不计次、不真发', async () => {
-  const { d, im } = fakes({
-    decisions: [], dryRun: true,
-    cfgOver: { caps: { dm: 5, like: 0, comment: 0, replyComment: 0, follow: 0, shareOwner: 0, dmReply: 0 } },
-  })
-  const a = await d.dmTo('https://www.douyin.com/user/MS4wLjABAAAAabcdefghijklmnopqrs', '试运行私信')
-  assert.equal(a.ok, true)
-  assert.match(a.message, /试运行/)
-  assert.equal(im._state.sent.length, 0)
-  assert.equal(d.state().dm, 0)
-  assert.equal(d.state().writes, 0)
-})
-
-test('IM：主人未核对拒绝分享', async () => {
-  const { d, im } = fakes({
-    decisions: [],
-    cfgOver: { owner: { input: 'x', secUid: '', uid: '', nickname: '', avatar: '', confirmedInput: '' } },
-  })
-  const r = await d.shareToOwner('https://www.douyin.com/video/1001', '看这个')
+test('抖音私信：一条都没读到时不做「第一次」初始化（免得之后把旧消息当新消息回）', async () => {
+  const chat = []
+  const { dy } = setup({ owner: OWNER, siteOpts: { chat }, turn: () => '在呢' })
+  const r = await dy.checkOwnerDms()
   assert.equal(r.ok, false)
-  assert.match(r.message, /核对/)
-  assert.equal(im._state.shared.length, 0)
+  chat.push({ id: 'old', uid: '4182', text: '刚才的话', at: Date.now() - 60_000 })
+  const r2 = await dy.checkOwnerDms()
+  assert.match(r2.message, /第一次/, '读到消息后才初始化，旧消息不回')
+  assert.equal(r2.replied, 0)
 })
 
-test('IM：回执失败计入 failStreak', async () => {
-  const { d, im } = fakes({
-    decisions: [],
-    imScript: { failSend: true, failMessage: '发送失败：无回执' },
-    cfgOver: { caps: { dm: 5, like: 0, comment: 0, replyComment: 0, follow: 0, shareOwner: 0, dmReply: 0 }, gate: { maxWritesPerDay: 60, minWriteGapSec: 0, newAccountDays: 0 } },
-  })
-  const target = 'https://www.douyin.com/user/MS4wLjABAAAAabcdefghijklmnopqrs'
-  for (let i = 0; i < 3; i++) {
-    const r = await d.dmTo(target, 'hi' + i)
-    assert.equal(r.ok, false, r.message)
-    assert.match(r.message, /回执|失败/)
-  }
-  assert.equal(d.state().disabledOps.dm, true)
-  assert.equal(im._state.sent.length, 0)
+test('抖音私信：回复没发出去时这条不算看过，下次再试；同一条最多试 3 次', async () => {
+  const t = Date.now()
+  const chat = [{ id: 'a', uid: '4182', text: '旧的', at: t - 3600_000 }]
+  const { dy, fs } = setup({ owner: OWNER, siteOpts: { chat }, turn: () => '在呢' })
+  await dy.checkOwnerDms()
+  chat.push({ id: 'b', uid: '4182', text: '111', at: t })
+  fs.calls.dmFail = 1
+  const r1 = await dy.checkOwnerDms()
+  assert.equal(r1.ok, false)
+  const r2 = await dy.checkOwnerDms()
+  assert.equal(r2.replied, 1, '下次检查重试成功')
+  assert.deepEqual(fs.calls.dm, ['在呢'])
+  assert.equal((await dy.checkOwnerDms()).replied, 0, '回过的不再回')
+  chat.push({ id: 'c', uid: '4182', text: '在吗', at: t })
+  fs.calls.dmFail = 99
+  for (let i = 0; i < 4; i++) await dy.checkOwnerDms()
+  fs.calls.dmFail = 0
+  assert.equal((await dy.checkOwnerDms()).replied, 0, '试了 3 次还不行就放弃这条')
 })
 
-test('IM：socialBusy 打断刷流并写入 lastSkipReason', async () => {
-  const events = []
-  const sent = []
-  const drv = cdp.createFakeDriver({ feed: feed.map((x) => ({ ...x })) })
-  const im = imMod.createFakeImClient({ owner: { uid: 'owner_uid', secUid: 'owner_sec' } })
-  const base = normalize({
-    enabled: true, dryRun: false, ownerQQ: '10000001', ownerName: '主人',
-    douyin: {
-      enabled: true, perRun: 2, maxWatchPerDay: 30, maxRunsPerDay: 3, intervalHours: 4,
-      dwellMin: 8, dwellMax: 40, socialInterruptBrowse: true,
-      caps: { like: 0, comment: 0, replyComment: 0, follow: 0, dm: 5, shareOwner: 0, dmReply: 0 },
-      gate: { maxWritesPerDay: 60, minWriteGapSec: 0, newAccountDays: 0 },
-      owner: { input: 'owner_id', secUid: 'owner_sec', uid: 'owner_uid', nickname: '主人', avatar: 'https://x/a', confirmedInput: 'owner_id' },
-    },
-    profilePerms: Object.fromEntries(DOUYIN_PERM_KEYS.map((k) => [k, 'owner'])),
-  })
-  const dataFile = join(process.env.AURABOT_DATA_DIR, `douyin-busy-${Math.random().toString(16).slice(2)}.json`)
-  const d = duty.createDouyin({
-    getConfig: () => base,
-    hub: {
-      runSystemTurn: async (_n, _t, prompt) => {
-        if (prompt.includes('看完说说你的想法')) {
-          d._setSocialBusy(true)
-          return JSON.stringify([
-            { i: 1, feeling: 'a', like: false, comment: '', follow: false, share: '', remember: '' },
-            { i: 2, feeling: 'b', like: false, comment: '', follow: false, share: '', remember: '' },
-          ])
-        }
-        return ''
-      },
-      sendText: async (c, t) => sent.push({ c, t }),
-      logChat() {},
-    },
-    memory: { list: () => [], recentEvents: () => [], addEvent: (e) => events.push(e.text), add() {} },
-    log: { info() {}, warn() {}, debug() {} },
-    driver: drv,
-    im,
-    dataFile,
-  })
-  const r = await d.run({ force: true })
-  assert.equal(r.ok, false)
-  assert.equal(r.interrupted, true)
-  assert.match(r.message, /社交优先|打断/)
-  assert.match(d.state().lastSkipReason, /社交优先|打断/)
+test('抖音私信：提示词明说「没在刷、没写 [去刷抖音] 就别说在刷」（她以前会顺口说「我刚钻进推荐里」）', async () => {
+  const t = Date.now()
+  const chat = [{ id: 'a', uid: '4182', text: '旧的', at: t - 3600_000 }]
+  const { dy, prompts } = setup({ owner: OWNER, siteOpts: { chat }, turn: () => '在呢' })
+  await dy.checkOwnerDms()
+  chat.push({ id: 'b', uid: '4182', text: '在吗', at: t })
+  await dy.checkOwnerDms()
+  const p = prompts.find((x) => /抖音私信/.test(x))
+  assert.match(p, /你现在没在刷抖音/)
+  assert.match(p, /没写 \[去刷抖音\] 就不会去刷/)
 })
 
-test('配置：socialInterruptBrowse 默认开，可关', () => {
-  const c = normalize({})
-  assert.equal(c.douyin.socialInterruptBrowse, true)
-  const c2 = normalize({ douyin: { socialInterruptBrowse: false } })
-  assert.equal(c2.douyin.socialInterruptBrowse, false)
+test('主人亲口让她找视频：今天看满了也照样去刷一轮；自己刷 / 别人叫的照旧受上限管', async () => {
+  const { dy, fs } = setup({ owner: OWNER, douyinOver: { maxWatchPerDay: 0 }, decisions: [{ i: 1 }, { i: 2 }, { i: 3 }] })
+  const plain = await dy.run({ force: true })
+  assert.equal(plain.ok, false)
+  assert.match(plain.message, /今天已经看了/)
+  const asked = await dy.run({ force: true, ownerAsked: true })
+  assert.equal(asked.ok, true)
+  assert.ok(fs.calls.watch.length > 0)
 })
 
-test('IM 登录：startQrLogin 只返回 started+QR，不算已登录；扫码→确认→落盘', async () => {
-  const im = imMod.createFakeImClient({ needLogin: true, qrDataUrl: 'data:image/png;base64,aW1xcg==' })
-  const start = await im.startQrLogin()
-  assert.equal(start.ok, true)
-  assert.equal(start.started, true)
-  assert.equal(start.loggedIn, false, 'started 绝不能当已登录')
-  assert.equal(start.phase, 'waiting_scan')
-  assert.ok(start.qrDataUrl.startsWith('data:image/'))
-  assert.equal(im.status().loggedIn, false)
-
-  let st = im.getLoginStatus()
-  assert.equal(st.phase, 'waiting_scan')
-  assert.equal(st.loggedIn, false)
-
-  im._advanceLogin('scanned')
-  st = im.getLoginStatus()
-  assert.equal(st.phase, 'scanned')
-  assert.match(st.message, /扫码|确认/)
-  assert.equal(st.loggedIn, false)
-
-  im._advanceLogin('confirmed', { nickname: '扫码用户' })
-  st = im.getLoginStatus()
-  assert.equal(st.loggedIn, false)
-
-  im._advanceLogin('logged_in', { nickname: '扫码用户', uid: 'u_qr' })
-  st = im.getLoginStatus()
-  assert.equal(st.loggedIn, true)
-  assert.equal(st.phase, 'logged_in')
-  assert.equal(im.status().loggedIn, true)
-  assert.equal(im.status().uid, 'u_qr')
-  assert.match(st.message, /已登录/)
-})
-
-test('IM 登录：过期与失败态；短信验证在状态里明确提示', async () => {
-  const im = imMod.createFakeImClient({ needLogin: true })
-  await im.startQrLogin()
-  im._advanceLogin('expired')
-  let st = im.getLoginStatus()
-  assert.equal(st.phase, 'expired')
-  assert.equal(st.loggedIn, false)
-  assert.equal(st.qrDataUrl, '')
-  assert.match(st.message, /过期/)
-
-  const refreshed = await im.refreshQrLogin()
-  assert.equal(refreshed.phase, 'waiting_scan')
-  assert.ok(refreshed.qrDataUrl)
-
-  im._advanceLogin('sms_required', { verifyHint: '请输入短信验证码（138****）' })
-  st = im.getLoginStatus()
-  assert.equal(st.phase, 'sms_required')
-  assert.match(st.verifyHint, /短信/)
-  assert.equal(st.loggedIn, false)
-
-  const sms = await im.submitLoginSms('123456')
-  assert.equal(sms.loggedIn, true)
-  assert.equal(sms.phase, 'logged_in')
-  assert.equal(im.status().loggedIn, true)
-
-  const im2 = imMod.createFakeImClient({ needLogin: true })
-  await im2.startQrLogin()
-  im2._advanceLogin('verification_required', { verifyHint: '需要滑块验证' })
-  st = im2.getLoginStatus()
-  assert.equal(st.phase, 'verification_required')
-  assert.match(st.verifyHint, /滑块/)
-  assert.equal(st.loggedIn, false)
-
-  const im3 = imMod.createFakeImClient({ needLogin: true, loginFail: true, loginFailMessage: '假失败' })
-  const fail = await im3.startQrLogin()
-  assert.equal(fail.ok, false)
-  assert.equal(fail.loggedIn, false)
-  assert.equal(fail.phase, 'error')
-})
-
-test('IM 登录：duty.startImLogin / imLoginStatus 不把 started 当成功登录', async () => {
-  const { d, im } = fakes({ decisions: [], imScript: { needLogin: true } })
-  const start = await d.startImLogin()
-  assert.equal(start.ok, true)
-  assert.equal(start.started, true)
-  assert.equal(start.loggedIn, false)
-  assert.equal(start.phase, 'waiting_scan')
-  assert.ok(start.qrDataUrl)
-  assert.equal((await d.imStatus()).loggedIn, false)
-
-  im._advanceLogin('scanned')
-  const mid = await d.imLoginStatus()
-  assert.equal(mid.phase, 'scanned')
-  assert.equal(mid.loggedIn, false)
-
-  im._advanceLogin('logged_in')
-  const done = await d.imLoginStatus()
-  assert.equal(done.loggedIn, true)
-  assert.equal(done.phase, 'logged_in')
-  assert.equal((await d.imStatus()).loggedIn, true)
-})
-
-test('浏览器登录：假驱动返回面板 QR；轮询 isLogin；过期可刷新；验证在状态提示', async () => {
-  const drv = cdp.createFakeDriver({ needLogin: true, qrDataUrl: 'data:image/png;base64,YnJxdXI=' })
-  const start = await drv.startLoginQr()
-  assert.equal(start.ok, true)
-  assert.equal(start.started, true)
-  assert.equal(start.loggedIn, false)
-  assert.equal(start.phase, 'waiting_scan')
-  assert.ok(start.qrDataUrl.startsWith('data:image/'))
-
-  let poll = await drv.pollLoginQr()
-  assert.equal(poll.loggedIn, false)
-  assert.equal(poll.phase, 'waiting_scan')
-
-  await drv._advanceBrowserLogin('expired')
-  poll = await drv.pollLoginQr()
-  assert.equal(poll.phase, 'expired')
-  assert.equal(poll.loggedIn, false)
-
-  const refreshed = await drv.refreshLoginQr()
-  assert.equal(refreshed.phase, 'waiting_scan')
-  assert.ok(refreshed.qrDataUrl)
-
-  await drv._advanceBrowserLogin('verification_required', { verifyHint: '需要滑块验证' })
-  poll = await drv.pollLoginQr()
-  assert.equal(poll.phase, 'verification_required')
-  assert.match(poll.verifyHint || '', /滑块|验证/)
-  assert.equal(poll.loggedIn, false)
-
-  await drv._advanceBrowserLogin('logged_in')
-  poll = await drv.pollLoginQr()
-  assert.equal(poll.loggedIn, true)
-  assert.equal(poll.phase, 'logged_in')
-  const gate = await drv.checkGate()
-  assert.equal(gate.ok, true)
-})
-
-test('浏览器登录：markVerify 后页面恢复 / clearVerify，poll 不再卡 verification_required', async () => {
-  const drv = cdp.createFakeDriver({ needLogin: true, qrDataUrl: 'data:image/png;base64,YnJxdXI=' })
-  await drv.startLoginQr()
-  drv.markVerify('页面要验证')
-  assert.equal(drv.paused, true)
-  let poll = await drv.pollLoginQr()
-  assert.equal(poll.phase, 'verification_required')
-  assert.equal(poll.loggedIn, false)
-
-  // 显式 clear：仍未登录 → 回到扫码，不再卡 verify
-  drv.clearVerify()
-  poll = await drv.pollLoginQr()
-  assert.equal(poll.phase, 'waiting_scan')
-  assert.equal(drv.paused, false)
-
-  // 再撞验证墙，然后「页面文案已无验证」→ checkGate 自动 clear
-  drv.markVerify('滑块')
-  assert.equal((await drv.checkGate()).verify, true)
-  drv._state.pageText = '推荐 关注 消息'
-  drv._state.needLogin = false
-  const auto = await drv.checkGate()
-  assert.equal(auto.ok, true)
-  assert.equal(drv.paused, false)
-
-  poll = await drv.pollLoginQr()
-  assert.equal(poll.loggedIn, true)
-  assert.equal(poll.phase, 'logged_in')
-})
-
-test('浏览器登录：duty.startBrowserLogin / browserLoginStatus 成功仅在 isLogin', async () => {
-  const { d, drv } = fakes({ decisions: [], script: { needLogin: true } })
-  const start = await d.startBrowserLogin()
-  assert.equal(start.ok, true)
-  assert.equal(start.started, true)
-  assert.equal(start.loggedIn, false)
-  assert.equal(start.phase, 'waiting_scan')
-  assert.ok(start.qrDataUrl)
-
-  const mid = await d.browserLoginStatus()
-  assert.equal(mid.loggedIn, false)
-
-  await drv._advanceBrowserLogin('logged_in')
-  const done = await d.browserLoginStatus()
-  assert.equal(done.loggedIn, true)
-  assert.equal(done.phase, 'logged_in')
-  const acct = await d.account(true)
-  assert.equal(acct.isLogin, true)
-})
-
-
-// —— Edge 重启后 attach / 清占用再开 ——
-test('CDP：readDevToolsActivePort 读第一行端口', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'edge-port-'))
-  writeFileSync(join(dir, 'DevToolsActivePort'), '59900\n/devtools/browser/abc\n')
-  assert.equal(cdp.readDevToolsActivePort(dir), 59900)
-  assert.equal(cdp.readDevToolsActivePort(join(dir, 'nope')), 0)
-  writeFileSync(join(dir, 'DevToolsActivePort'), 'not-a-port\n')
-  assert.equal(cdp.readDevToolsActivePort(dir), 0)
-})
-
-test('CDP：resolveLaunchTarget 已有端口可连 → attach', async () => {
-  const probed = []
-  const r = await cdp.resolveLaunchTarget('/tmp/edge-profile-x', {
-    readPort: () => 59900,
-    probe: async (p) => { probed.push(p); return p === 59900 ? { Browser: 'Edge', webSocketDebuggerUrl: 'ws://127.0.0.1:59900/devtools/browser/x' } : null },
-    findProcs: () => [{ pid: 4242, port: 59900 }],
-  })
-  assert.equal(r.mode, 'attach')
-  assert.equal(r.port, 59900)
-  assert.deepEqual(probed, [59900])
-})
-
-test('CDP：resolveLaunchTarget 无文件端口但进程带 remote-debugging → attach', async () => {
-  const r = await cdp.resolveLaunchTarget('/data/edge-profile', {
-    readPort: () => 0,
-    probe: async (p) => (p === 60111 ? { Browser: 'Edge' } : null),
-    findProcs: () => [{ pid: 77, port: 60111 }],
-  })
-  assert.equal(r.mode, 'attach')
-  assert.equal(r.port, 60111)
-  assert.equal(r.pid, 77)
-})
-
-test('CDP：resolveLaunchTarget 占用但端口连不上 → spawn + killPids', async () => {
-  const r = await cdp.resolveLaunchTarget('/data/edge-profile', {
-    readPort: () => 59900,
-    probe: async () => null,
-    findProcs: () => [{ pid: 101, port: 59900 }, { pid: 102, port: 0 }],
-  })
-  assert.equal(r.mode, 'spawn')
-  assert.deepEqual(r.killPids, [101, 102])
-})
-
-test('CDP：findBrowserProcessesForProfile 从 ps 输出解析本 profile', () => {
-  const profile = '/home/u/data/edge-profile'
-  const psOut = [
-    '  1 /sbin/init',
-    ` 4242 /opt/msedge --user-data-dir=${profile} --remote-debugging-port=59900 https://www.douyin.com`,
-    ' 4243 /opt/msedge --type=renderer',
-    ` 9999 /usr/bin/google-chrome --user-data-dir=/other/profile --remote-debugging-port=9222`,
-  ].join('\n')
-  const procs = cdp.findBrowserProcessesForProfile(profile, {
-    platform: 'linux',
-    execFile: () => psOut,
-  })
-  assert.equal(procs.length, 1)
-  assert.equal(procs[0].pid, 4242)
-  assert.equal(procs[0].port, 59900)
-})
-
-test('CDP：killBrowserProcessesForProfile 只杀匹配 pid', () => {
-  const killed = []
-  const out = cdp.killBrowserProcessesForProfile('/p', {
-    find: () => [{ pid: 11, port: 1 }, { pid: 22, port: 0 }],
-    kill: (pid, sig) => { killed.push([pid, sig]) },
-  })
-  assert.deepEqual(out, [11, 22])
-  assert.deepEqual(killed, [[11, 'SIGTERM'], [22, 'SIGTERM']])
-})
-
-/** 极简假 WebSocket：open 后 send 立即回空 result，够 attachPage 的 enable 命令。 */
-function FakeWs(url) {
-  this.url = url
-  this.listeners = {}
-  queueMicrotask(() => {
-    for (const fn of this.listeners.open || []) fn()
-  })
-}
-FakeWs.prototype.addEventListener = function (ev, fn) {
-  ;(this.listeners[ev] ||= []).push(fn)
-}
-FakeWs.prototype.send = function (raw) {
-  let msg
-  try { msg = JSON.parse(raw) } catch { return }
-  if (msg.id == null) return
-  queueMicrotask(() => {
-    for (const fn of this.listeners.message || []) {
-      fn({ data: JSON.stringify({ id: msg.id, result: {} }) })
-    }
-  })
-}
-FakeWs.prototype.close = function () {}
-
-test('CDP launch：已有调试端口可连 → attach，不 spawn', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'edge-attach-'))
-  writeFileSync(join(dir, 'DevToolsActivePort'), '59900\n/devtools/browser/x\n')
-  const spawns = []
-  const drv = cdp.createBrowserDriver({
-    profileDir: dir,
-    browserPath: '/fake/msedge',
-    minimize: false,
-    wsFactory: FakeWs,
-    hooks: {
-      findBrowser: () => '/fake/msedge',
-      freePort: async () => 60123,
-      spawn: (...a) => { spawns.push(a); return { pid: 1, unref() {} } },
-      getJson: async (url) => {
-        if (url.includes('/json/version')) {
-          return { Browser: 'Edge', webSocketDebuggerUrl: 'ws://127.0.0.1:59900/devtools/browser/x' }
-        }
-        if (url.includes('/json/list')) {
-          return [{ type: 'page', webSocketDebuggerUrl: 'ws://127.0.0.1:59900/devtools/page/1' }]
-        }
-        throw new Error('unexpected ' + url)
-      },
-      findBrowserProcessesForProfile: () => [{ pid: 4242, port: 59900 }],
-      sleep: async () => {},
-    },
-  })
-  const r = await drv.launch()
-  assert.equal(r.ok, true)
-  assert.equal(r.attached, true)
-  assert.equal(r.port, 59900)
-  assert.equal(spawns.length, 0)
-  drv.close()
-})
-
-test('CDP launch：占用且端口起不来 → 清本 profile 旧进程再 spawn', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'edge-clear-'))
-  writeFileSync(join(dir, 'DevToolsActivePort'), '59900\n/devtools/browser/x\n')
-  const spawns = []
-  const kills = []
-  let versionOk = false
-  const drv = cdp.createBrowserDriver({
-    profileDir: dir,
-    browserPath: '/fake/msedge',
-    minimize: false,
-    wsFactory: FakeWs,
-    hooks: {
-      findBrowser: () => '/fake/msedge',
-      freePort: async () => 60123,
-      spawn: (bin, args) => {
-        spawns.push({ bin, args })
-        versionOk = true
-        return { pid: 555, unref() {} }
-      },
-      getJson: async (url) => {
-        if (url.includes(':59900/')) throw new Error('fetch failed')
-        if (url.includes('/json/version')) {
-          if (!versionOk) throw new Error('fetch failed')
-          return { Browser: 'Edge', webSocketDebuggerUrl: 'ws://127.0.0.1:60123/devtools/browser/x' }
-        }
-        if (url.includes('/json/list')) {
-          return [{ type: 'page', webSocketDebuggerUrl: 'ws://127.0.0.1:60123/devtools/page/1' }]
-        }
-        throw new Error('unexpected ' + url)
-      },
-      findBrowserProcessesForProfile: () => [{ pid: 4242, port: 59900 }],
-      killPid: (pid, sig) => { kills.push([pid, sig]) },
-      sleep: async () => {},
-      probeDebugPort: async () => null,
-    },
-  })
-  const r = await drv.launch()
-  assert.equal(r.ok, true)
-  assert.equal(r.attached, false)
-  assert.equal(r.port, 60123)
-  assert.ok(kills.some(([pid]) => pid === 4242), '应结束占用本 profile 的旧进程')
-  assert.equal(spawns.length, 1)
-  assert.ok(spawns[0].args.some((a) => a.includes('--user-data-dir=' + dir)))
-  assert.ok(spawns[0].args.some((a) => a === '--remote-debugging-port=60123'))
-  drv.close()
-})
-
-test('CDP launch：spawn 后端口仍起不来 → 文案含 profile 与 port', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'edge-fail-'))
-  const drv = cdp.createBrowserDriver({
-    profileDir: dir,
-    browserPath: '/fake/msedge',
-    minimize: false,
-    hooks: {
-      findBrowser: () => '/fake/msedge',
-      freePort: async () => 60123,
-      spawn: () => ({ pid: 1, unref() {} }),
-      getJson: async () => { throw new Error('fetch failed') },
-      findBrowserProcessesForProfile: () => [{ pid: 9, port: 59900 }],
-      killPid: () => {},
-      sleep: async () => {},
-      resolveLaunchTarget: async () => ({ mode: 'spawn', killPids: [9] }),
-      probeDebugPort: async () => null,
-    },
-  })
-  const r = await drv.launch()
-  assert.equal(r.ok, false)
-  assert.match(r.message, /资料目录被占用|调试端口没起来/)
-  assert.match(r.message, /profile=/)
-  assert.match(r.message, /port=60123/)
-  assert.match(r.message, /fetch failed/)
-})
-
-
-test('CDP：Windows 扫进程走 -EncodedCommand，能解析 msedge+remote-debugging-port', () => {
-  const profile = '/home/u/data/edge-profile'
-  const script = cdp.buildWindowsBrowserScanScript(profile)
-  // 整段脚本，Where-Object 块不被 join(' ') 拆坏；含 -replace 反斜杠规则
-  assert.match(script, /\$ProgressPreference='SilentlyContinue'/)
-  assert.match(script, /\$want = '/)
-  assert.match(script, /Where-Object \{[\s\S]*-and[\s\S]*Contains\(\$want\)[\s\S]*\}/)
-  assert.ok(!script.includes('Get-CimInstance Win32_Process | Where-Object {  $_.Name'), '不应是单行空格拼接')
-  const encoded = cdp.encodePowerShellEncodedCommand(script)
-  assert.equal(Buffer.from(encoded, 'base64').toString('utf16le'), script)
-
-  const wantNorm = cdp.normalizeProfilePath(profile)
-  // 模拟 WMI 输出：反斜杠路径 + remote-debugging-port
-  const winLine = `4242\tC:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe --user-data-dir=${profile.replace(/\//g, '\\\\')} --remote-debugging-port=59900 about:blank`
-  const parsed = cdp.parseBrowserProcessScanLine(winLine, profile)
-  assert.ok(parsed)
-  assert.equal(parsed.pid, 4242)
-  assert.equal(parsed.port, 59900)
-
-  let sawEncoded = false
-  const procs = cdp.findBrowserProcessesForProfile(profile, {
-    platform: 'win32',
-    execFile: (bin, args) => {
-      assert.equal(bin, 'powershell.exe')
-      assert.ok(args.includes('-EncodedCommand'), '必须用 -EncodedCommand，禁止手拼 -Command')
-      assert.ok(!args.includes('-Command'))
-      const i = args.indexOf('-EncodedCommand')
-      const dec = Buffer.from(args[i + 1], 'base64').toString('utf16le')
-      assert.equal(dec, script)
-      assert.ok(dec.includes(wantNorm.replace(/'/g, "''")) || dec.toLowerCase().includes('edge-profile'))
-      sawEncoded = true
-      return winLine + '\r\n9999\tC:\\chrome.exe --user-data-dir=C:\\other --remote-debugging-port=9222\r\n'
-    },
-  })
-  assert.equal(sawEncoded, true)
-  assert.equal(procs.length, 1)
-  assert.equal(procs[0].pid, 4242)
-  assert.equal(procs[0].port, 59900)
-})
-
-test('CDP：ensureDevToolsActivePort 缺失时自写 port+path', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'edge-dtap-'))
-  assert.equal(cdp.readDevToolsActivePort(dir), 0)
-  assert.equal(cdp.ensureDevToolsActivePort(dir, 60123), true)
-  assert.equal(cdp.readDevToolsActivePort(dir), 60123)
-  const body = readFileSync(join(dir, 'DevToolsActivePort'), 'utf8')
-  assert.match(body, /^60123\n\/devtools\//)
-  // 已是同端口 → 不再写
-  assert.equal(cdp.ensureDevToolsActivePort(dir, 60123), false)
-})
-
-test('CDP launch：spawn 成功且无 DevToolsActivePort 时自写，供重启 attach', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'edge-write-port-'))
-  assert.equal(cdp.readDevToolsActivePort(dir), 0)
-  let versionOk = false
-  const drv = cdp.createBrowserDriver({
-    profileDir: dir,
-    browserPath: '/fake/msedge',
-    minimize: false,
-    wsFactory: FakeWs,
-    hooks: {
-      findBrowser: () => '/fake/msedge',
-      freePort: async () => 60123,
-      spawn: () => { versionOk = true; return { pid: 555, unref() {} } },
-      getJson: async (url) => {
-        if (url.includes('/json/version')) {
-          if (!versionOk) throw new Error('fetch failed')
-          return { Browser: 'Edge', webSocketDebuggerUrl: 'ws://127.0.0.1:60123/devtools/browser/x' }
-        }
-        if (url.includes('/json/list')) {
-          return [{ type: 'page', webSocketDebuggerUrl: 'ws://127.0.0.1:60123/devtools/page/1' }]
-        }
-        throw new Error('unexpected ' + url)
-      },
-      findBrowserProcessesForProfile: () => [],
-      sleep: async () => {},
-      resolveLaunchTarget: async () => ({ mode: 'spawn', killPids: [] }),
-      probeDebugPort: async () => null,
-    },
-  })
-  const r = await drv.launch()
-  assert.equal(r.ok, true)
-  assert.equal(r.attached, false)
-  assert.equal(r.port, 60123)
-  assert.equal(cdp.readDevToolsActivePort(dir), 60123, 'spawn 后应自写 DevToolsActivePort')
-  drv.close()
-})
-
-
-test('shareBias：默认 proactive；normalize 认 stingy/normal；刷流 prompt 带对应倾向', async () => {
-  assert.equal(normalize({}).douyin.shareBias, 'proactive')
-  assert.equal(normalize({ douyin: { shareBias: 'stingy' } }).douyin.shareBias, 'stingy')
-  assert.equal(normalize({ douyin: { shareBias: 'normal' } }).douyin.shareBias, 'normal')
-  assert.equal(normalize({ douyin: { shareBias: 'off' } }).douyin.shareBias, 'stingy')
-  assert.equal(normalize({ douyin: { shareBias: 'weird' } }).douyin.shareBias, 'proactive')
-  assert.equal(normalize({}).douyin.caps.shareOwner, 5)
-
-  const proactive = fakes({
-    decisions: [{ i: 1, feeling: '好看', like: false, comment: '', share: '', remember: '' }],
-    cfgOver: { shareBias: 'proactive', perRun: 1 },
-  })
-  await proactive.d.run({ force: true })
-  const pTurn = proactive.hub.turns.find((x) => x.prompt.includes('看完说说你的想法'))
-  assert.ok(pTurn)
-  assert.match(pTurn.prompt, /分享要积极/)
-
-  const stingy = fakes({
-    decisions: [{ i: 1, feeling: '好看', like: false, comment: '', share: '', remember: '' }],
-    cfgOver: { shareBias: 'stingy', perRun: 1 },
-  })
-  await stingy.d.run({ force: true })
-  const sTurn = stingy.hub.turns.find((x) => x.prompt.includes('看完说说你的想法'))
-  assert.ok(sTurn)
-  assert.match(sTurn.prompt, /一定会喜欢再写 share/)
-  assert.ok(!sTurn.prompt.includes('分享要积极'))
-})
-
-test('抖音 IM 私信：假 inbox → hub.runSystemTurn(douyin-im, noTools) → IM 发出，不是 silent log-only', async () => {
-  const now = Date.now()
-  const { d, im, hub } = fakes({
-    decisions: [],
-    imScript: { inbox: [
-      { secUid: 'owner_sec', uid: 'owner_uid', nickname: '主人', text: '在干嘛', at: now },
-    ] },
-  })
-  const r = await d.checkOwnerDms()
-  assert.equal(r.replied, 1, r.message)
-  assert.equal(im._state.sent.length, 1)
-  assert.equal(im._state.sent[0].text, '收到啦')
-  const imTurn = hub.turns.find((x) => x.name === 'douyin-im')
-  assert.ok(imTurn, '应走 douyin-im 会话')
-  assert.equal(imTurn.opts.noTools, true, '私信轮关工具')
-  assert.match(imTurn.title, /私信/)
-  assert.match(imTurn.prompt, /在干嘛/)
-})
-
-test('CDP nextAwemes：attach 后 feed 空 → 重导航 recommend+from_nav 并用 DOM 种子 aweme_id', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'edge-refill-'))
-  writeFileSync(join(dir, 'DevToolsActivePort'), '59900\n/devtools/browser/x\n')
-  const navigates = []
-  const muted = []
-  function RefillWs(url) {
-    this.url = url
-    this.listeners = {}
-    queueMicrotask(() => { for (const fn of this.listeners.open || []) fn() })
-  }
-  RefillWs.prototype.addEventListener = function (ev, fn) {
-    ;(this.listeners[ev] ||= []).push(fn)
-  }
-  RefillWs.prototype.send = function (raw) {
-    let msg
-    try { msg = JSON.parse(raw) } catch { return }
-    if (msg.id == null) return
-    let result = {}
-    if (msg.method === 'Page.setMuted') muted.push(msg.params)
-    if (msg.method === 'Page.navigate') navigates.push(msg.params?.url || '')
-    if (msg.method === 'Runtime.evaluate') {
-      const expr = String(msg.params?.expression || '')
-      if (expr.includes('matchAll') && expr.includes('aweme_id')) {
-        result = { result: { value: [
-          { aweme_id: '7123456789012345678', desc: '', author: { nickname: '' }, statistics: {} },
-          { aweme_id: '7123456789012345679', desc: '', author: { nickname: '' }, statistics: {} },
-        ] } }
-      } else {
-        result = { result: { value: expr.includes('location.href') ? 'https://www.douyin.com/?recommend=1&from_nav=1' : undefined } }
-      }
-    }
-    queueMicrotask(() => {
-      for (const fn of this.listeners.message || []) {
-        fn({ data: JSON.stringify({ id: msg.id, result }) })
-      }
-    })
-  }
-  RefillWs.prototype.close = function () {}
-
-  const drv = cdp.createBrowserDriver({
-    profileDir: dir,
-    browserPath: '/fake/msedge',
-    minimize: false,
-    wsFactory: RefillWs,
-    hooks: {
-      findBrowser: () => '/fake/msedge',
-      freePort: async () => 60123,
-      spawn: (...a) => { throw new Error('should attach, not spawn: ' + a) },
-      getJson: async (url) => {
-        if (url.includes('/json/version')) {
-          return { Browser: 'Edge', webSocketDebuggerUrl: 'ws://127.0.0.1:59900/devtools/browser/x' }
-        }
-        if (url.includes('/json/list')) {
-          return [{ type: 'page', webSocketDebuggerUrl: 'ws://127.0.0.1:59900/devtools/page/1' }]
-        }
-        throw new Error('unexpected ' + url)
-      },
-      findBrowserProcessesForProfile: () => [{ pid: 4242, port: 59900 }],
-      sleep: async () => {},
-    },
-  })
-  const launched = await drv.launch()
-  assert.equal(launched.ok, true)
-  assert.equal(launched.attached, true)
-  assert.ok(muted.some((m) => m && m.muted === true), 'attach 应 Page.setMuted')
-  assert.equal(drv.recentFeed().length, 0, '刚 attach 时 feed 仍空')
-
-  const list = await drv.nextAwemes({ seen: new Set(), want: 2 })
-  assert.ok(navigates.some((u) => /recommend=1/.test(u) && /from_nav=1/.test(u)), '空 feed 应重导航推荐页: ' + navigates.join(','))
-  assert.equal(list.length, 2)
-  assert.equal(list[0].awemeId, '7123456789012345678')
-  assert.ok(drv.recentFeed().length >= 2, 'DOM 种子应写入 feed')
-  drv.close()
+test('私信里让她去刷、却没刷成：在私信里照实跟主人说一声（以前「我这就去翻」之后就没下文了）', async () => {
+  const t = Date.now()
+  const chat = [{ id: 'a', uid: '4182', text: '旧的', at: t - 3600_000 }]
+  const { dy, fs, prompts } = setup({ owner: OWNER, siteOpts: { chat, feed: [] }, turn: (p) => (/没刷成/.test(p) ? '刚才没刷成 推荐里没刷到新的' : '得令\n[去刷抖音]') })
+  await dy.checkOwnerDms()
+  chat.push({ id: 'b', uid: '4182', text: '刷会儿抖音给我找个视频', at: t })
+  await dy.checkOwnerDms()
+  assert.ok(await until(() => fs.calls.dm.length === 2), '先回「得令」，没刷成再说一声')
+  assert.deepEqual(fs.calls.dm, ['得令', '刚才没刷成 推荐里没刷到新的'])
+  assert.ok(prompts.some((p) => /没刷成/.test(p)))
 })
