@@ -109,7 +109,8 @@ export default {
         const seen = allowLook ? await gen.look(buf, String(prompt || '')) : ''
 
         memory.addEvent?.({ text: `画了一张图：${String(prompt).slice(0, 40)}`, about: chat.kind === 'private' ? chat.userId : '', tags: ['画画'], importance: 0.4 })
-        const out = { ok: true, message: drawToolMessage({ saved, seen, visual, seeOwn }) }
+        // 不把存盘路径告诉她：知道路径她就会自己去读图，绕开「不给看」的开关（图已经发到聊天里了）
+        const out = { ok: true, message: drawToolMessage({ seen, visual, seeOwn }) }
         // 图要先缩、再登记成 DSH 附件块 —— 直接塞 base64 会让下一轮请求整轮失败（实测）
         if (allowLook) {
           const img = await gen.toolImage(buf)

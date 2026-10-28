@@ -31,16 +31,24 @@ test('drawResultBlocks：有图时文字 + image 块，没图时只有文字', (
 })
 
 test('drawToolMessage：三种情况说清楚，别让她瞎猜画面', () => {
-  const saved = 'C:/x/a.png'
   // 看过：带描述
-  assert.match(drawToolMessage({ saved, seen: '一只橘猫', visual: true, seeOwn: true }), /你自己看到的画面：一只橘猫/)
+  const seen = drawToolMessage({ seen: '一只橘猫', visual: true, seeOwn: true })
+  assert.match(seen, /你自己看到的画面：一只橘猫/)
   // 能看图但没让它看：明确说没给图
-  assert.match(drawToolMessage({ saved, seen: '', visual: true, seeOwn: false }), /没把图给你看/)
-  assert.doesNotMatch(drawToolMessage({ saved, seen: '', visual: true, seeOwn: false }), /你自己看到的画面/)
+  const off = drawToolMessage({ seen: '', visual: true, seeOwn: false })
+  assert.match(off, /没把图给你看/)
+  assert.doesNotMatch(off, /你自己看到的画面/)
   // 模型看不了图：明确说看不了
-  assert.match(drawToolMessage({ saved, seen: '', visual: false, seeOwn: true }), /看不了图/)
-  // 都没有存盘路径时也不能崩
+  assert.match(drawToolMessage({ seen: '', visual: false, seeOwn: true }), /看不了图/)
+  // 空参数也不能崩
   assert.match(drawToolMessage({}), /画好发出去了/)
+
+  // ⚠ 任何情况都不带文件路径：带了她会自己用文件工具去读图，绕开「不给看」开关
+  for (const msg of [seen, off, drawToolMessage({ seen: '', visual: false, seeOwn: true })]) {
+    assert.doesNotMatch(msg, /存在\s*[A-Za-z]:[\\/]/, '不能带盘符路径')
+    assert.doesNotMatch(msg, /\.png|\.jpg|\.jpeg/i, '不能带文件名')
+    assert.doesNotMatch(msg, /读它|读一下|自己读/, '不能提示去读文件')
+  }
 })
 
 test('toolImage：小图登记成附件块；没附件服务 / 登记失败 → null', async () => {

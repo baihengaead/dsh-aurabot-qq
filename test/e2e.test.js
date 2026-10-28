@@ -576,6 +576,7 @@ test('生图工具结果：能看图时带 image 块，纯文本模型只给文�
   assert.equal(blocks.length, 2)
   assert.equal(blocks[1].type, 'image')
   assert.match(withImg.message, /你自己看到的画面/, '「画完看一眼」开着时会多一段描述')
+  assert.doesNotMatch(withImg.message, /存在|\.png|读它/, '工具结果里不能给出图片路径（否则她会自己去读）')
 
   // 关掉「画完自己看一眼」= 当没视觉能力处理：不给图、不描述
   const noLook = await draw('on', false)

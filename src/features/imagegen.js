@@ -358,14 +358,15 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
  * - 看过（有描述）：把描述带回去
  * - 能看图但「画完自己看一眼」关着：这次没给图，别描述
  * - 模型看不了图：明确说看不了
+ *
+ * ⚠ 不告诉她文件路径：给了路径她就会自己用文件工具去读图，"不给看"的开关就形同虚设
+ *   （图已经发到聊天里了，她不需要路径；图库是给主人看的）。
  */
-export function drawToolMessage ({ saved = '', seen = '', visual = false, seeOwn = true } = {}) {
-  const file = saved ? `（存在 ${saved}，你想看可以自己读它）` : ''
-  const bare = saved ? `（存在 ${saved}）` : ''
-  if (seen) return `画好发出去了${file}。你自己看到的画面：${seen}`
-  if (!visual) return `画好发出去了${bare}。你现在的模型看不了图，别描述画面里有什么`
-  if (!seeOwn) return `画好发出去了${file}。这次没把图给你看，别描述画面里有什么`
-  return `画好发出去了${file}`
+export function drawToolMessage ({ seen = '', visual = false, seeOwn = true } = {}) {
+  if (seen) return `画好发出去了。你自己看到的画面：${seen}`
+  if (!visual) return '画好发出去了。你现在的模型看不了图，别描述画面里有什么'
+  if (!seeOwn) return '画好发出去了。这次没把图给你看，别描述画面里有什么'
+  return '画好发出去了'
 }
 
 /**
