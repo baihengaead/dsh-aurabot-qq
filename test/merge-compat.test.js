@@ -14,6 +14,36 @@ const { createHub } = await import('../src/chat/hub.js')
 const OWNER = '10000001'
 const BOT = '20000002'
 const CHAT = `private:${OWNER}`
+
+test('升级 1.1.6 后，三种生图通道与本地增强配置在保存重载后保持兼容', async (t) => {
+  for (const provider of ['openai', 'custom', 'codex']) await t.test(provider, () => {
+    const before = normalize({
+      imageGen: { provider, shape: 'wide', seeOwn: false, galleryShown: 17,
+        codex: { model: 'gpt-image-2', quality: 'high', background: 'transparent' },
+        custom: { method: 'POST', url: 'https://image.test/generate', bodyType: 'json', responsePath: 'data.0.url', params: [{ key: 'prompt', value: '{prompt}' }] } },
+      voice: { engine: 'edge', rate: '+0%', pitch: '+50Hz' },
+      debug: true, security: { ssrfMode: 'loose' }, stickers: { collectMode: 'owner' },
+      group: { ownerBrief: { enabled: true, lines: 12, groups: ['777'] } },
+      bili: { vision: true, visionFrames: 6 }, douyin: { enabled: false },
+      modules: { douyin: { enabled: false }, bili: { useBuiltin: false, enabled: true } },
+    })
+    const after = normalize(JSON.parse(JSON.stringify(before)))
+    assert.deepEqual(after.imageGen, before.imageGen)
+    assert.equal(after.imageGen.provider, provider)
+    assert.equal(after.voice.rate, '+0%')
+    assert.equal(after.voice.pitch, '+50Hz')
+    assert.equal(after.debug, true)
+    assert.equal(after.security.ssrfMode, 'loose')
+    assert.equal(after.stickers.collectMode, 'owner')
+    assert.deepEqual(after.group.ownerBrief, before.group.ownerBrief)
+    assert.equal(after.bili.vision, true)
+    assert.equal(after.douyin.enabled, false)
+    assert.equal(after.modules.douyin.enabled, false)
+    assert.equal(after.modules.bili.useBuiltin, false)
+    assert.equal(after.profilePerms.douyinDm, 'owner')
+  })
+})
+
 const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(setImmediate) }
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
 

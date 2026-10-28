@@ -1,30 +1,11 @@
 // 内置模块：生图。她能画图发到聊天里（OpenAI 兼容的生图服务、自定义接口、ChatGPT 订阅，或「本地接口」里的 SD WebUI / ComfyUI）。
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { createImageGen, drawResultBlocks, drawToolMessage } from '../../features/imagegen.js'
-import { listPaintings, openPaintFolder, paintingPath, removePainting } from '../../features/paintings.js'
+import { listPaintings, openPaintFolder, paintingPath, removePainting, savePainting } from '../../features/paintings.js'
 import { defineTool, str } from '../../tools/tools.js'
 import { dataDir } from '../../core/store.js'
 import { mimeOf } from '../../chat/inbound.js'
-
-/** 把画好的图存一份，返回路径（她自己能去读，主人也能回看画过什么）。 */
-function saveImage (buf, prompt) {
-  try {
-    const dir = dataDir('imagegen')
-    mkdirSync(dir, { recursive: true })
-    const d = new Date()
-    const p = (n) => String(n).padStart(2, '0')
-    const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
-    const slug = String(prompt || '图').replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 20)
-    const ext = mimeOf(buf) === 'image/jpeg' ? 'jpg' : 'png'
-    const file = join(dir, `${stamp}-${slug}.${ext}`)
-    writeFileSync(file, buf)
-    return file
-  } catch (error) {
-    return ''
-  }
-}
 
 export default {
   id: 'imagegen',
@@ -32,7 +13,7 @@ export default {
   version: '1.0.0',
   description: '画一张图发到聊天里（qq_draw_image）',
   tab: 'imagegen',
-  files: ['features/imagegen.js', 'features/codex-auth.js'],
+  files: ['features/imagegen.js', 'features/paintings.js', 'features/codex-auth.js'],
   setup(api) {
     const { hub, local } = api.core
     const memory = api.lazy('memory')
@@ -99,7 +80,7 @@ export default {
         const buf = await gen.generate(String(prompt || ''), { shape: String(shape || '') })
         const sent = await hub.sendSegments(chat.chatId, [{ type: 'image', data: { file: 'base64://' + buf.toString('base64') } }], `[生图] ${String(prompt).slice(0, 30)}`)
         if (!sent) return { ok: false, message: '画好了，但没有发到 QQ（请检查试运行和网关）' }
-        const saved = saveImage(buf, String(prompt || ''))
+        const saved = savePainting(buf, String(prompt || ''))
         if (saved) api.log.debug(`生图已存盘：${saved}`)
         try {
           memory.addEvent?.({ text: `按提示词画了一张图（不一定等于实际画面）：${String(prompt).slice(0, 120)}`, about: chat.kind === 'private' ? chat.userId : '', tags: ['画画'], importance: 0.4 })

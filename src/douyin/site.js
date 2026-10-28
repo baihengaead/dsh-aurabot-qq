@@ -390,7 +390,7 @@ export function createSite({ browser, log }) {
   const DM_EDIT = '[data-aurabot="dm-edit"]'
 
   /** 打开和某人的私信会话：会话 id 是「0:1:双方 uid」，按 uid 认人。页面在后台时列表要十几秒才出来。 */
-  async function openChat(uid) {
+  async function openChat(uid, { secUid = '' } = {}) {
     if (!String(await b.evaluate('location.href').catch(() => '')).startsWith(CHAT)) await b.goto(CHAT)
     let found = false
     for (let i = 0; i < 40 && !found; i++) {
@@ -420,9 +420,47 @@ export function createSite({ browser, log }) {
       })()`).catch(() => false)
       if (!found) await sleep(1000)
     }
-    if (!found) throw Object.assign(new Error('私信列表里没找到主人（还没互发过私信？）'), { code: 'dm' })
+    // 列表里没有：用主页的「私信」按钮开一个新会话（陌生人也能主动发起）
+    if (!found && secUid) found = await openFromProfile(secUid)
+    if (!found) throw Object.assign(new Error('私信列表里没找到这个人，主页也没有可用的「私信」入口（可能对方关闭了私信）'), { code: 'dm' })
     await b.press('[data-aurabot="conv"]')
     await sleep(1500)
+  }
+
+  /** 打开某人的主页，点「私信」发起会话（列表里还没有的陌生人）。只打开会话，不发消息。 */
+  async function openFromProfile(secUid) {
+    const id = String(secUid || '')
+    if (!/^MS4w[\w-]+$/.test(id)) return false
+    await b.goto(`https://www.douyin.com/user/${id}`)
+    const marked = await (async () => {
+      for (let i = 0; i < 25; i++) {
+        const ok = await b.evaluate(`(() => {
+          // 「私信」可能在 button 里，也可能是个 div / span；取可见元素里最小（最像按钮）的那个
+          const nodes = [...document.querySelectorAll('button,[role="button"],div,span,a,[data-e2e]')]
+            .filter((n) => (n.innerText || '').trim() === '私信')
+            .filter((n) => { const r = n.getBoundingClientRect(); return r.width > 10 && r.height > 10 })
+          if (!nodes.length) return false
+          nodes.sort((a, c) => (a.getBoundingClientRect().width * a.getBoundingClientRect().height) - (c.getBoundingClientRect().width * c.getBoundingClientRect().height))
+          const hit = nodes[0]
+          document.querySelectorAll('[data-aurabot="dm-open"]').forEach((x) => x.removeAttribute('data-aurabot'))
+          hit.setAttribute('data-aurabot', 'dm-open')
+          return true
+        })()`).catch(() => false)
+        if (ok) return true
+        await sleep(1000)
+      }
+      return false
+    })()
+    if (!marked) return false
+    await b.press('[data-aurabot="dm-open"]')
+    // 点完可能停在私信页，也可能弹出会话：等到输入框出现，再按 uid 核对一次会话
+    for (let i = 0; i < 20; i++) {
+      await sleep(1000)
+      const href = String(await b.evaluate('location.href').catch(() => ''))
+      // URL 可能不带 isPopup 参数，按域名 + 路径判断，再看输入框是否真的出现
+      if (/^https:\/\/www\.douyin\.com\/chat/.test(href) && await b.evaluate(`Boolean(document.querySelector('.editor-kit-container[contenteditable="true"]'))`).catch(() => false)) return true
+    }
+    return false
   }
 
   /** 当前会话里的消息（从旧到新）：{ id, uid, text, at, card }；card = 分享的视频 { awemeId, title }。 */
@@ -447,8 +485,8 @@ export function createSite({ browser, log }) {
   }
 
   /** 和这个人的私信：打开会话、读最近的消息（页面在后台时消息要过一会儿才加载出来，等一等）。 */
-  async function dms(uid) {
-    await openChat(uid)
+  async function dms(uid, { secUid = '' } = {}) {
+    await openChat(uid, { secUid })
     let list = []
     for (let i = 0; i < 15 && !list.length; i++) {
       list = await readChat()
@@ -521,6 +559,28 @@ export function createSite({ browser, log }) {
     return { secUid: String(u.sec_uid), uid: String(u.uid || ''), nickname: clean(u.nickname, 40), douyinId: String(u.unique_id || u.short_id || '') }
   }
 
+  /**
+   * 认一个人：主页链接 / secUid 直接查；v.douyin.com 短链先在浏览器里跳一下取主页；
+   * 其余当抖音号搜。找不到会抛错。
+   */
+  async function profileOf(link) {
+    const s = String(link || '').trim()
+    if (!s) throw new Error('没给抖音主页链接或抖音号')
+    const direct = s.match(/douyin\.com\/user\/(MS4w[\w-]+)/)?.[1] || (/^MS4w[\w-]+$/.test(s) ? s : '')
+    if (direct) return user(direct)
+    if (/^https?:\/\//i.test(s)) {
+      await b.goto(s)
+      for (let i = 0; i < 10; i++) {
+        const href = String(await b.evaluate('location.href').catch(() => ''))
+        const sec = href.match(/douyin\.com\/user\/(MS4w[\w-]+)/)?.[1]
+        if (sec) return user(sec)
+        await sleep(1000)
+      }
+      throw new Error('这个链接不是抖音主页（或者没跳过去）')
+    }
+    return findByDouyinId(s.replace(/^@/, ''))
+  }
+
   /** 按抖音号搜人，只认抖音号完全一样的。 */
   async function findByDouyinId(douyinId) {
     const j = await api('/aweme/v1/web/discover/search/', { keyword: douyinId, search_channel: 'aweme_user_web', search_source: 'normal_search', query_correct_type: 1, is_filter_search: 0, offset: 0, count: 10 })
@@ -566,5 +626,5 @@ export function createSite({ browser, log }) {
     return { ok: true, loggedIn: false, shot: await loginShot() }
   }
 
-  return { ensure, self, user, findByDouyinId, feed, detail, comments, verify, watch, like, comment, share, dms, sendDm, loginStart, loginPoll, show: (v) => b.show(v), connected: () => b.connected() }
+  return { ensure, self, user, profileOf, findByDouyinId, feed, detail, comments, verify, watch, like, comment, share, dms, sendDm, screenshot: () => b.screenshot().catch(() => ''), loginStart, loginPoll, show: (v) => b.show(v), connected: () => b.connected() }
 }

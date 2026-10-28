@@ -73,7 +73,14 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
     const qq = getConfig().ownerQQ
     if (qq && s.notifiedDay !== s.pauseDay) {
       s.notifiedDay = s.pauseDay
-      Promise.resolve(hub.sendText?.(`private:${qq}`, `抖音那边要验证 / 被限制了，今天我先不点赞评论了：${s.pauseReason}。请在手机抖音检查账号安全或实名状态；也可以在面板「抖音」页点「显示浏览器窗口」查看。`)).catch(() => {})
+      const note = `抖音那边要验证 / 被限制了，今天我先不点赞评论了：${s.pauseReason}。请在手机抖音检查账号安全或实名状态；也可以在面板「抖音」页点「显示浏览器窗口」查看。`
+      Promise.resolve(hub.sendText?.(`private:${qq}`, note)).catch(() => {})
+      // 顺手把当前页面截图发给主人：有些验证网页上不显示，截图能看清到底弹了什么（每天只发一次）
+      Promise.resolve().then(() => site.screenshot?.()).then((shot) => {
+        const b64 = String(shot || '').replace(/^data:image\/png;base64,/, '')
+        if (!b64) return null
+        return hub.sendSegments?.(`private:${qq}`, [{ type: 'image', data: { file: 'base64://' + b64 } }], '[抖音验证页面截图]')
+      }).catch(() => {})
     }
   }
 
@@ -431,6 +438,43 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
     }
   }
 
+  /**
+   * 主人明确要求给某个人发抖音私信：主页 / 抖音号 → 认人 → 打开会话（列表里没有就从主页「私信」发起）→ 发一句。
+   * 只主动找主人指定的对象；别人的私信照样只回主人。试运行只记日志。
+   */
+  async function directDm({ target, text }) {
+    const who = String(target || '').trim()
+    const say = clip(text, 300)
+    if (!who) return { ok: false, message: '要发给谁？给个抖音主页链接或抖音号' }
+    if (!say) return { ok: false, message: '要说什么？' }
+    if (busy) return { ok: false, message: '正在刷抖音，等这一轮刷完再说' }
+    busy = true
+    const s = load()
+    try {
+      const r = await ready(s)
+      if (!r.ok) return r
+      // 主页链接 / v.douyin.com 短链 / secUid / 抖音号都行（短链会在浏览器里跳一下取主页）
+      const u = await site.profileOf(who)
+      await site.dms(u.uid, { secUid: u.secUid }) // 列表里没有会话时会从主页发起
+      if (getConfig().dryRun) {
+        log.info(`试运行：本来要给抖音上的 ${u.nickname} 发私信：${say}`)
+        record(s, { kind: 'dry:dm-out', text: say, title: u.nickname })
+        return { ok: true, message: `试运行：本来要发给「${u.nickname}」`, nickname: u.nickname }
+      }
+      await site.sendDm(say)
+      record(s, { kind: 'dm-out', text: say, title: u.nickname })
+      memory?.addEvent?.({ text: `在抖音给${u.nickname}发了私信：${say.slice(0, 50)}`, tags: ['抖音'], importance: 0.4 })
+      return { ok: true, message: `发给「${u.nickname}」了`, nickname: u.nickname }
+    } catch (error) {
+      log.warn('主动发抖音私信没成：', error.message)
+      record(s, { kind: 'error', text: '主动私信没发成：' + error.message })
+      return { ok: false, message: '没发成：' + error.message }
+    } finally {
+      save(s)
+      busy = false
+    }
+  }
+
   /** 主人明确要求分享指定视频时，复用相同的额度、收件人核对和分享记录。 */
   async function shareVideo(link) {
     const id = await idOf(link)
@@ -667,5 +711,5 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
     }
   }
 
-  return { run, browse, watch, recentVideos, shareVideo, likeVideo, commentVideo, confirmOwner, checkOwnerDms, tick, account, loginStep, showWindow, state }
+  return { run, browse, watch, recentVideos, shareVideo, directDm, likeVideo, commentVideo, confirmOwner, checkOwnerDms, tick, account, loginStep, showWindow, state }
 }

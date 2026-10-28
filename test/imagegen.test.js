@@ -88,7 +88,7 @@ test('接口直接回图片字节：照原样收下', async () => {
   const orig = globalThis.fetch
   globalThis.fetch = async (url, opt) => {
     calls.push({ url, method: opt?.method })
-    return { ok: true, status: 200, headers: new Map([['content-type', 'image/png']]) && { get: () => 'image/png' }, arrayBuffer: async () => PNG }
+    return { ok: true, status: 200, headers: { get: () => 'image/png' }, arrayBuffer: async () => PNG }
   }
   try {
     const gen = createImageGen({ getConfig: () => ({ imageGen: baseGen({ method: 'GET', url: 'https://x.test/p/{prompt}', params: [{ key: 'model', value: 'flux' }] }) }), log, local: null })
@@ -154,6 +154,9 @@ test('enabled()：自定义模式看地址有没有填', () => {
   const mk = (custom) => createImageGen({ getConfig: () => ({ imageGen: baseGen(custom) }), log, local: null }).enabled()
   assert.equal(mk({ method: 'GET', url: 'https://x.test/{prompt}' }), true)
   assert.equal(mk({ method: 'GET', url: '' }), false)
+  assert.equal(mk({}), false)
+  const off = createImageGen({ getConfig: () => ({ imageGen: baseGen({ url: 'https://x.test/{prompt}' }, { enabled: false }) }), log, local: null })
+  assert.equal(off.enabled(), false, '关掉总开关后不能生图')
 })
 
 after(() => {})

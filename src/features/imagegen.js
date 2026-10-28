@@ -19,6 +19,7 @@ function fill (tpl, vars) {
   return String(tpl ?? '').replace(/\{(\w+)\}/g, (m, k) => (vars[k] === undefined || vars[k] === null ? m : String(vars[k])))
 }
 
+/** "1024x768" → { width, height }。 */
 function dimsOf (size) {
   const m = /^(\d+)\s*[x×*]\s*(\d+)$/i.exec(String(size || ''))
   return m ? { width: m[1], height: m[2] } : { width: '', height: '' }
@@ -98,7 +99,7 @@ async function valueToBuffer (v) {
   if (typeof v !== 'string' || !v) throw new Error('生图接口没有返回图片')
   const b64 = /^data:image\/[^;]+;base64,(.+)$/i.exec(v)
   if (b64) return Buffer.from(b64[1], 'base64')
-  if (/^https?:\/\//i.test(v)) return fetchImage(v, { maxBytes: 20 * 1024 * 1024, allowLocal: false })
+  if (/^https?:\/\//i.test(v)) return fetchImage(v, { maxBytes: 20 * 1024 * 1024, allowLocal: false, timeoutMs: 120000 })
   throw new Error('生图接口返回的既不是图片地址也不是图片')
 }
 

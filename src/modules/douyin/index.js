@@ -62,6 +62,13 @@ export default {
         required: ['link'],
         execute: guarded('douyinShareOwner', ({ link }) => dy.shareVideo(String(link || ''))),
       }))
+      if (profileToolVisible(cfg, 'douyinDm', chat)) tools.push(defineTool({
+        name: 'douyin_send_dm',
+        description: '主人明确要求你给某个抖音用户发私信时用。target 填对方的主页链接或抖音号，text 是要说的话（300 字以内）。只发给主人指定的人。',
+        properties: { target: str('对方抖音主页链接或抖音号'), text: str('要说的话') },
+        required: ['target', 'text'],
+        execute: guarded('douyinDm', ({ target, text }) => dy.directDm({ target, text })),
+      }))
       if (profileToolVisible(cfg, 'douyinLike', chat)) tools.push(defineTool({
         name: 'douyin_like',
         description: '给一个抖音视频点赞。有人明确让你点赞时用。link 填视频链接。',

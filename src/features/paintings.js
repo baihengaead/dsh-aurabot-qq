@@ -3,13 +3,34 @@
 //
 // 存多久：**一直存着**，插件不会自动删；面板里可以一张张删，也可以直接开文件夹清理。
 
-import { readdirSync, statSync, unlinkSync, existsSync } from 'node:fs'
+import { readdirSync, statSync, unlinkSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { basename, extname, isAbsolute, join, normalize, relative } from 'node:path'
 import { dataDir, ensureDir } from '../core/store.js'
+import { mimeOf } from '../chat/inbound.js'
 
 const IMG_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif'])
 const dir = () => dataDir('imagegen')
+
+/**
+ * 把画好的图存一份，返回文件路径；存失败返回 ''。
+ * 文件名里带时间和提示词：图库列表直接用它当说明，不用另存元数据。
+ */
+export function savePainting (buf, prompt, { now = new Date() } = {}) {
+  try {
+    const d = dir()
+    mkdirSync(d, { recursive: true })
+    const p = (n) => String(n).padStart(2, '0')
+    const stamp = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`
+    const slug = String(prompt || '图').replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 20)
+    const ext = mimeOf(buf) === 'image/jpeg' ? 'jpg' : 'png'
+    const file = join(d, `${stamp}-${slug}.${ext}`)
+    writeFileSync(file, buf)
+    return file
+  } catch (error) {
+    return ''
+  }
+}
 
 /** 文件名安全：只接受本目录下的纯文件名，挡住 ../ 之类。 */
 export function safeName (file) {
