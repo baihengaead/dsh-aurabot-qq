@@ -8,6 +8,7 @@ import { spawn, execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
+import net from 'node:net'
 import { registerSecret } from '../core/redact.js'
 
 export const DOWNLOAD_PAGE = 'https://github.com/SnowLuma/SnowLuma/releases/latest'
@@ -69,6 +70,58 @@ export function readOneBotEndpoint(dir, uin) {
   registerSecret(out.httpToken)
   registerSecret(out.wsToken)
   return out
+}
+
+/** 从 httpUrl 里拆出 host / port（探端口用）。 */
+export function endpointHostPort(url) {
+  try {
+    const u = new URL(String(url || ''))
+    const port = Number(u.port || (u.protocol === 'https:' ? 443 : 80))
+    return u.hostname && port ? { host: u.hostname, port } : null
+  } catch (error) {
+    return null
+  }
+}
+
+/** 这个端口现在能不能连上（能连 = 有人在监听）。 */
+export function portOpen({ host, port }, { timeoutMs = 800 } = {}) {
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (v) => { if (done) return; done = true; try { sock.destroy() } catch (error) {} ; resolve(v) }
+    const sock = net.connect({ host, port })
+    sock.setTimeout(timeoutMs, () => finish(false))
+    sock.once('connect', () => finish(true))
+    sock.once('error', () => finish(false))
+  })
+}
+
+/**
+ * 网关现在是不是活着（不是"端口有人听"，而是真的能回 OneBot 请求）。
+ * 用于判断「已有 SnowLuma 实例可以复用」。
+ */
+export async function gatewayHealthy(endpoint, { fetchImpl = fetch, timeoutMs = 1500 } = {}) {
+  if (!endpoint || !endpoint.httpUrl) return false
+  try {
+    const headers = { 'content-type': 'application/json' }
+    if (endpoint.httpToken) headers.authorization = `Bearer ${endpoint.httpToken}`
+    const r = await fetchImpl(`${endpoint.httpUrl.replace(/\/+$/, '')}/get_login_info`, {
+      method: 'POST', headers, body: '{}', signal: AbortSignal.timeout(timeoutMs),
+    })
+    const j = await r.json().catch(() => null)
+    return Boolean(j && (j.status === 'ok' || j.retcode === 0))
+  } catch (error) {
+    return false
+  }
+}
+
+/** 等端口释放（上一个 SnowLuma 还在退出）。返回 true = 已释放。 */
+export async function waitPortFree(hostPort, { timeoutMs = 20000, intervalMs = 500, isOpen = portOpen } = {}) {
+  const until = Date.now() + timeoutMs
+  while (Date.now() < until) {
+    await new Promise((r) => setTimeout(r, intervalMs))
+    if (!(await isOpen(hostPort))) return true
+  }
+  return !(await isOpen(hostPort))
 }
 
 // SnowLuma 认不出号时 uin 可能是 null、'' 或 '0'（注入后才会有真号），都当「认不出」
@@ -181,6 +234,24 @@ export function createSnowLumaManager({ getConfig, log, savePassword }) {
     const inst = detectInstall(cfg().dir)
     if (!inst.installed) return { ok: false, message: inst.reason }
     if (await running()) return { ok: true, message: 'SnowLuma 已经在运行' }
+    // 上一轮 DSH 退出时 SnowLuma 可能还没退干净：先看网关/端口，别在端口没释放时硬启
+    // （硬启会 bind 失败，变成"WebUI 起来了但 OneBot 没监听"，之后所有消息都发不出去）
+    const ep = readOneBotEndpoint(cfg().dir, cfg().botQQ)
+    if (await gatewayHealthy(ep)) {
+      log.info('检测到还活着的 SnowLuma 网关，直接复用（不再启动第二个实例）')
+      return { ok: true, message: 'SnowLuma 已经在跑（直接复用）' }
+    }
+    const hp = endpointHostPort(ep.httpUrl)
+    if (hp && await portOpen(hp)) {
+      log.info(`OneBot 端口 ${hp.port} 还被占用（上一个 SnowLuma 还没退干净），等它释放…`)
+      const freed = await waitPortFree(hp, { timeoutMs: 20000 })
+      if (await gatewayHealthy(ep)) {
+        log.info('端口释放后网关已经有响应，直接复用')
+        return { ok: true, message: 'SnowLuma 已经在跑（直接复用）' }
+      }
+      if (freed) log.info(`OneBot 端口 ${hp.port} 已释放，开始启动`)
+      else log.warn(`OneBot 端口 ${hp.port} 等了 20 秒还被占用（可能是别的程序），仍然尝试启动`)
+    }
     const exe = inst.nodeExe || process.execPath
     const env = { ...process.env, SNOWLUMA_HOOK_AUTOLOAD: '0', SNOWLUMA_UPDATE_CHECK: '0' }
     delete env.SNOWLUMA_HOOK_AUTOLOAD_ALL

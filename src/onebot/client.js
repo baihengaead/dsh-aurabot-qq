@@ -3,12 +3,17 @@
 
 const RECONNECT_MIN = 2000
 const RECONNECT_MAX = 30000
+// 网关短暂不可用（SnowLuma 刚被重启、端口还没释放）时，发消息别直接丢：等一会儿再试
+const RETRY_DELAYS = [1000, 3000, 5000]
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 export class OneBotError extends Error {
-  constructor(action, data) {
+  constructor(action, data, { transport = false } = {}) {
     super(`${action} 失败：${data?.message || data?.wording || data?.retcode || '未知错误'}`)
     this.action = action
     this.data = data
+    // transport = 根本没连上网关（可以重试）；业务错误（retcode 不为 0、超时但也可能已经发出去）不重试
+    this.transport = transport
   }
 }
 
@@ -19,7 +24,7 @@ export class OneBotError extends Error {
  * @param {(state: string, detail?: string) => void} [o.onState]
  * @param {{info:Function, warn:Function, debug:Function}} o.log
  */
-export function createOneBotClient({ endpoint, onEvent, onState, log }) {
+export function createOneBotClient({ endpoint, onEvent, onState, log, retryDelays = RETRY_DELAYS }) {
   let ws = null
   let stopped = true
   let timer = null
@@ -34,7 +39,8 @@ export function createOneBotClient({ endpoint, onEvent, onState, log }) {
     try { onState?.(s, detail) } catch (error) {}
   }
 
-  async function call(action, params = {}, { timeoutMs = 30000 } = {}) {
+  /** 走一次 HTTP 或 WS；网络层失败标成 transport，业务错误照原样抛。 */
+  async function callOnce(action, params, timeoutMs) {
     const ep = endpoint()
     if (ep.httpUrl) {
       const ctrl = new AbortController()
@@ -50,8 +56,12 @@ export function createOneBotClient({ endpoint, onEvent, onState, log }) {
         throw new OneBotError(action, j)
       } catch (error) {
         if (error instanceof OneBotError) throw error
-        if (ws && ws.readyState === 1) return callWs(action, params, timeoutMs)
-        throw new OneBotError(action, { message: error.name === 'AbortError' ? '超时' : error.message })
+        // 超时可能是"已经发出去了只是没等到回执"，重试会重复发消息 —— 不重试
+        if (error.name === 'AbortError') throw new OneBotError(action, { message: '超时' })
+        if (ws && ws.readyState === 1) {
+          try { return await callWs(action, params, timeoutMs) } catch (wsError) { throw wsError }
+        }
+        throw new OneBotError(action, { message: describeNetError(error, ep) }, { transport: true })
       } finally {
         clearTimeout(t)
       }
@@ -59,8 +69,37 @@ export function createOneBotClient({ endpoint, onEvent, onState, log }) {
     return callWs(action, params, timeoutMs)
   }
 
+  function describeNetError(error, ep) {
+    const where = ep.httpUrl || ep.wsUrl || '(没配地址)'
+    const why = error?.cause?.code || error?.cause?.message || error?.message || String(error)
+    return `连不上 QQ 网关（${where}）：${why}`
+  }
+
+  async function call(action, params = {}, { timeoutMs = 30000, retries = retryDelays.length } = {}) {
+    const ep0 = endpoint()
+    // 压根没配网关：立即失败，别让调用方白等重试（查群名之类的会立刻回退）
+    if (!ep0.httpUrl && !ep0.wsUrl) {
+      throw new OneBotError(action, { message: '还没配置 QQ 网关地址' }, { transport: true })
+    }
+    let lastError = null
+    for (let i = 0; i <= retries; i++) {
+      try {
+        return await callOnce(action, params, timeoutMs)
+      } catch (error) {
+        lastError = error
+        // 业务错误（比如没权限、参数不对）重试也没用
+        if (!(error instanceof OneBotError) || !error.transport) throw error
+        if (i === retries) break
+        const wait = retryDelays[i] ?? retryDelays[retryDelays.length - 1]
+        log?.warn?.(`${action}：网关暂时连不上，${wait / 1000}s 后重试（${i + 1}/${retries}）`)
+        await sleep(wait)
+      }
+    }
+    throw lastError
+  }
+
   function callWs(action, params, timeoutMs) {
-    if (!ws || ws.readyState !== 1) return Promise.reject(new OneBotError(action, { message: '没连上 QQ 网关' }))
+    if (!ws || ws.readyState !== 1) return Promise.reject(new OneBotError(action, { message: '没连上 QQ 网关' }, { transport: true }))
     const echo = `ab-${Date.now()}-${++echoSeq}`
     return new Promise((resolve, reject) => {
       const t = setTimeout(() => {

@@ -737,7 +737,8 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   async function groupName(gid) {
     if (groupNames.has(gid)) return groupNames.get(gid)
     try {
-      const info = await onebot.call('get_group_info', { group_id: Number(gid) })
+      // 查群名是锦上添花：失败就退回群号，别在网关抖动时白等重试
+      const info = await onebot.call('get_group_info', { group_id: Number(gid) }, { retries: 0 })
       if (info?.group_name) groupNames.set(gid, info.group_name)
     } catch (error) {}
     return groupNames.get(gid) || gid
