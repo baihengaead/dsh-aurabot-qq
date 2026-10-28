@@ -242,7 +242,9 @@ export function createSnowLumaManager({ getConfig, log, savePassword }) {
       return { ok: true, message: 'SnowLuma 已经在跑（直接复用）' }
     }
     const hp = endpointHostPort(ep.httpUrl)
-    if (hp && await portOpen(hp)) {
+    if (!hp) {
+      log.debug('启动前探测：读不到 OneBot 地址，直接启动')
+    } else if (await portOpen(hp)) {
       log.info(`OneBot 端口 ${hp.port} 还被占用（上一个 SnowLuma 还没退干净），等它释放…`)
       const freed = await waitPortFree(hp, { timeoutMs: 20000 })
       if (await gatewayHealthy(ep)) {
@@ -251,6 +253,8 @@ export function createSnowLumaManager({ getConfig, log, savePassword }) {
       }
       if (freed) log.info(`OneBot 端口 ${hp.port} 已释放，开始启动`)
       else log.warn(`OneBot 端口 ${hp.port} 等了 20 秒还被占用（可能是别的程序），仍然尝试启动`)
+    } else {
+      log.debug(`启动前探测：${hp.port} 端口空闲、网关没响应，正常启动`)
     }
     const exe = inst.nodeExe || process.execPath
     const env = { ...process.env, SNOWLUMA_HOOK_AUTOLOAD: '0', SNOWLUMA_UPDATE_CHECK: '0' }
