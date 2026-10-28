@@ -18,6 +18,7 @@ export function createFakeDsh({ brain }) {
   function makeAgent(sessionId, preset) {
     const tools = new Map()
     const contexts = new Map()
+    const restrictions = new Map()
     const events = []
     let turn = 0
     let chain = Promise.resolve()
@@ -35,10 +36,33 @@ export function createFakeDsh({ brain }) {
       denied: new Set(),
       ctx: {
         tools: {
-          register: (t) => { tools.set(t.name, t); return () => tools.delete(t.name) },
-          restrict: ({ deny = [] }) => { for (const n of deny) agent.denied.add(n); return () => { for (const n of deny) agent.denied.delete(n) } },
+          register: (t) => {
+            if (tools.has(t.name)) throw new Error(`tool "${t.name}" is already registered in this scope`)
+            tools.set(t.name, t)
+            let active = true
+            return () => { if (active && tools.get(t.name) === t) tools.delete(t.name); active = false }
+          },
+          restrict: ({ deny = [] }) => {
+            const names = [...new Set(deny)]
+            for (const n of names) { restrictions.set(n, (restrictions.get(n) || 0) + 1); agent.denied.add(n) }
+            let active = true
+            return () => {
+              if (!active) return
+              active = false
+              for (const n of names) {
+                const count = restrictions.get(n) - 1
+                if (count) restrictions.set(n, count)
+                else { restrictions.delete(n); agent.denied.delete(n) }
+              }
+            }
+          },
         },
-        systemPrompt: { context: (c) => { contexts.set(c.name, c); return () => contexts.delete(c.name) } },
+        systemPrompt: { context: (c) => {
+          if (contexts.has(c.name)) throw new Error(`prompt context "${c.name}" is already registered in this scope`)
+          contexts.set(c.name, c)
+          let active = true
+          return () => { if (active && contexts.get(c.name) === c) contexts.delete(c.name); active = false }
+        } },
       },
       steered: [],
       // 假的 steer：记下来，并当作下一步输入（这里简化成排在当前这一轮之后再跑一轮）
@@ -77,7 +101,7 @@ export function createFakeDsh({ brain }) {
   const provided = new Map() // ctx.provide 登记的服务
   const ctx = {
     globalTools,
-    tools: { register: (t) => { if (globalTools.has(t.name)) throw new Error('dup ' + t.name); globalTools.set(t.name, t); return () => globalTools.delete(t.name) } },
+    tools: { register: (t) => { if (globalTools.has(t.name)) throw new Error('dup ' + t.name); globalTools.set(t.name, t); let active = true; return () => { if (active && globalTools.get(t.name) === t) globalTools.delete(t.name); active = false } } },
     provide(name, value) { provided.set(name, value); disposers.push(() => provided.delete(name)) },
     logger: { info: (m) => logs.push(m), warn: (m) => logs.push(m), error: (m) => logs.push(m) },
     effect(fn) {
@@ -157,5 +181,5 @@ export function createFakeDsh({ brain }) {
     return { status, raw: () => out, json: () => JSON.parse(out) }
   }
 
-  return { ctx, routes, variables, agents, workspaces, turns, logs, call, dispose: () => disposers.reverse().forEach((d) => { try { d() } catch (e) {} }) }
+  return { ctx, routes, variables, agents, workspaces, turns, logs, call, dispose: () => disposers.splice(0).reverse().forEach((d) => { try { d() } catch (e) {} }) }
 }

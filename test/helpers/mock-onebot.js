@@ -49,11 +49,13 @@ export async function startMockOneBot({ selfId = '20000002', token = 'mock-token
   let msgSeq = 1000
   const faces = new Map()
   const qzone = new Map()
-  const state = { failRecord: false, roles: {}, favorites: [] } // favorites：机器人号 QQ 收藏表情的地址 // roles: 群号 → 机器人在群里的身份（默认群主）
+  const state = { failRecord: false, roles: {}, favorites: [], selfProfile: { nickname: '大肥鱼', long_nick: '爱吃白米饭' } } // favorites：机器人号 QQ 收藏表情的地址 // roles: 群号 → 机器人在群里的身份（默认群主）
 
   function handle(action, params) {
     switch (action) {
-      case 'get_login_info': return { user_id: Number(selfId), nickname: '大肥鱼' }
+      case 'get_login_info': return { user_id: Number(selfId), nickname: state.selfProfile.nickname }
+      case 'set_qq_profile': state.selfProfile.nickname = params.nickname; return null
+      case 'set_self_longnick': state.selfProfile.long_nick = params.longNick; return null
       case 'send_private_msg':
       case 'send_group_msg':
         if (state.failRecord && params.message?.[0]?.type === 'record') throw new Error('record not supported')
@@ -82,7 +84,9 @@ export async function startMockOneBot({ selfId = '20000002', token = 'mock-token
       case 'get_forward_msg': return { messages: (state.forwards || {})[params.id] || [] }
       case 'send_poke': return null
       case 'get_group_msg_history': case 'get_friend_msg_history': return { messages: state.history || [] }
-      case 'get_stranger_info': return { user_id: params.user_id, nickname: '路人' + params.user_id }
+      case 'get_stranger_info': return String(params.user_id) === String(selfId)
+        ? { user_id: Number(selfId), ...state.selfProfile }
+        : { user_id: params.user_id, nickname: '路人' + params.user_id }
       case 'fetch_ptt_text': return { text: '今天想吃白米饭' }
       case 'set_group_ban': case 'set_group_kick': case 'set_group_special_title': case '_send_group_notice': return null
       default: return null

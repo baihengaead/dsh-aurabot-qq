@@ -45,6 +45,14 @@ const PREFIX = '/aurabot/api'
 export function apply(ctx) {
   const logger = createLogger({ dsh: ctx })
   const log = logger.child('core')
+  let disposed = false
+  const delayed = new Set()
+  const later = (fn, ms) => {
+    if (disposed) return
+    const timer = setTimeout(() => { delayed.delete(timer); if (!disposed) fn() }, ms)
+    delayed.add(timer)
+    timer.unref?.()
+  }
   let cfg = loadConfig()
   let mods = null
   let bridge = null
@@ -53,6 +61,7 @@ export function apply(ctx) {
   setSsrpMode(() => (getConfig().security && getConfig().security.ssrfMode === 'loose' ? 'loose' : 'strict'))
   const secrets = () => { for (const k of ['webuiPassword', 'httpToken', 'wsToken']) registerSecret(cfg.snowluma[k]); registerSecret(cfg.imageGen.apiKey); registerSecret(cfg.bridge.token) }
   const setConfig = (next) => {
+    if (disposed) throw new Error('Aurabot 插件已卸载')
     const before = cfg
     cfg = saveConfig(next)
     secrets()
@@ -101,6 +110,7 @@ export function apply(ctx) {
   let pendingEvents = []
   let hub = null
   async function checkLogin() {
+    if (disposed) return
     verifying = true
     pendingEvents = []
     try {
@@ -111,13 +121,15 @@ export function apply(ctx) {
       } catch (error) {
         logger.child('onebot').warn('核对登录的 QQ 号失败：', error.message)
       }
-      if (onebotState !== 'connected') return
+      if (disposed || onebotState !== 'connected') return
       if (!uin) {
         // 核对不了就别用，断开后由看门狗重试
         onebot.stop()
         return
       }
-      if (await snowluma.confirmLogin(uin)) {
+      const confirmed = await snowluma.confirmLogin(uin)
+      if (disposed) return
+      if (confirmed) {
         loginOk = true
         wrongAccount = ''
         // 把核对期间攒下的补上（按到达顺序）
@@ -135,7 +147,7 @@ export function apply(ctx) {
   }
   /** 核对通过后的事件都在这里处理（onEvent 直接调，核对期间攒下的也会补到这里）。 */
   function handleEvent(ev) {
-    if (!hub) return
+    if (disposed || !hub) return
     // 模块能看到所有原始事件（加群、撤回、好友申请……），只看不拦
     mods?.emit('onebot', ev)
     if (ev.post_type === 'message' || ev.post_type === 'message_sent') {
@@ -148,6 +160,7 @@ export function apply(ctx) {
     endpoint,
     log: logger.child('onebot'),
     onState: (s, d) => {
+      if (disposed) return
       onebotState = s
       if (s !== 'connected') { loginOk = false; pendingEvents = [] }
       else checkLogin().catch((error) => log.warn('核对登录号出错：', error.message))
@@ -155,6 +168,7 @@ export function apply(ctx) {
       mods?.emit('onebot/state', s)
     },
     onEvent: (ev) => {
+      if (disposed) return
       // 还没核对是机器人号：核对期间先攒着，核对通过后补处理
       if (!loginOk) {
         if (verifying) {
@@ -176,6 +190,7 @@ export function apply(ctx) {
    * 面板据此把「思考强度」置灰，免得选了之后整轮报错）。
    */
   async function listModels() {
+    if (disposed) return []
     const llm = ctx.llm || ctx.get('llm')
     const out = []
     for (const p of llm.listProviders() || []) {
@@ -187,12 +202,12 @@ export function apply(ctx) {
         }
       } catch (error) {}
     }
-    if (out.length) modelCache = out
+    if (!disposed && out.length) modelCache = out
     return out
   }
   // 最近一次查到的模型列表：按聊天选的模型已经不在 DSH 里了，就退回下一级（同步取，hub 每条消息都要用）
   let modelCache = null
-  setTimeout(() => { listModels().catch(() => {}) }, 3000).unref?.()
+  later(() => { listModels().catch(() => {}) }, 3000)
 
   // 聊天中枢找表情库、语音时，找的是当时在跑的那个模块；模块关着就当没有
   const use = (id) => mods?.use(id) || null
@@ -315,6 +330,8 @@ export function apply(ctx) {
   core.modules = mods
   const booted = mods.boot()
   booted.then(() => {
+    // 模块初始化可能跨过卸载时刻，结束后仍要撤掉它创建的资源。
+    if (disposed) { mods.dispose(); return }
     bridge.refresh()
     // 启动时就开着调试的，顺手把调试会话建出来（没建过才会建）
     if (getConfig().debug) hub.ensureDebugSession().catch((error) => log.warn('建调试会话失败：', error.message))
@@ -334,34 +351,50 @@ export function apply(ctx) {
 
   // ---------- 启动 / 看门狗 ----------
   async function watchdog() {
+    if (disposed) return
     if (!cfg.enabled) {
       if (onebot.state !== 'stopped') onebot.stop()
       return
     }
     const own = cfg.gateway === 'snowluma' // 接别人的 OneBot 时不启动、不注入 SnowLuma
     const inst = snowluma.detect()
-    if (own && inst.installed && cfg.snowluma.autoStart && !(await snowluma.running())) {
-      const r = await snowluma.start()
-      log.info('SnowLuma：', r.message)
+    if (own && inst.installed && cfg.snowluma.autoStart) {
+      const running = await snowluma.running()
+      if (disposed) return
+      if (!running) {
+        const r = await snowluma.start()
+        if (disposed) { snowluma.dispose(); return }
+        log.info('SnowLuma：', r.message)
+      }
     }
     // 上次连上的不是机器人号：等主人手动点「接入机器人号」或改设置再连
     if (wrongAccount) return
     if (onebot.state === 'stopped') onebot.start()
-    if (own && cfg.snowluma.autoAttach && cfg.snowluma.webuiPassword && onebotState !== 'connected' && (await snowluma.running())) {
+    if (own && cfg.snowluma.autoAttach && cfg.snowluma.webuiPassword && onebotState !== 'connected') {
+      const running = await snowluma.running()
+      if (disposed || !running) return
       const last = snowluma.lastAttach
       if (Date.now() - last.at > 60_000) {
         const r = await snowluma.attachBot()
+        if (disposed) return
         log.info('接入机器人号：', r.message)
       }
     }
   }
-  const safe = (fn, label) => () => { Promise.resolve().then(fn).catch((error) => log.warn(`${label}出错：`, error.message)) }
+  const safe = (fn, label) => () => { Promise.resolve().then(() => { if (!disposed) return fn() }).catch((error) => { if (!disposed) log.warn(`${label}出错：`, error.message) }) }
   ctx.effect(() => ctx.interval(safe(watchdog, '看门狗'), 30_000), 'aurabot: 看门狗')
-  setTimeout(safe(watchdog, '看门狗'), 3000).unref?.()
+  later(safe(watchdog, '看门狗'), 3000)
   ctx.effect(() => () => {
-    mods.dispose()
-    onebot.stop()
-    snowluma.dispose()
+    if (disposed) return
+    disposed = true
+    for (const timer of delayed) clearTimeout(timer)
+    delayed.clear()
+    pendingEvents = []
+    verifying = false
+    loginOk = false
+    for (const cleanup of [() => hub.dispose(), () => bridge.dispose(), () => mods.dispose(), () => onebot.stop(), () => snowluma.dispose()]) {
+      try { cleanup() } catch (error) { log.warn('卸载清理失败：', error.message) }
+    }
   }, 'aurabot: 收尾')
 
   // ---------- 面板接口 ----------
@@ -430,7 +463,7 @@ export function apply(ctx) {
     if (changedModel) { clearReasoningCache(); clearVisionCache() }
     if (changedConn || before.botQQ !== cfg.botQQ) wrongAccount = ''
     if (changedConn && onebot.state !== 'stopped') onebot.restart()
-    if (!before.enabled && cfg.enabled) setTimeout(safe(watchdog, '看门狗'), 100)
+    if (!before.enabled && cfg.enabled) later(safe(watchdog, '看门狗'), 100)
     if (before.enabled && !cfg.enabled) onebot.stop()
     log.info(`设置已保存｜总开关 ${cfg.enabled ? '开' : '关'}｜试运行 ${cfg.dryRun && !cfg.debug ? '开' : '关'}｜调试 ${cfg.debug ? '开' : '关'}`)
     await mods.sync().catch(() => {})

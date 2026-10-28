@@ -19,20 +19,6 @@ async function until(fn, ms = 8000) {
   }
   throw new Error('等不到条件成立')
 }
-/**
- * 等网关安静下来再开始计数：上一个用例的回复有时还没发完，
- * 会被算进下一个用例的「发送条数」里（空间日记那条用例年年偶发就是这个）。
- */
-async function settle(quietMs = 300) {
-  let last = mock.calls.length
-  let quiet = 0
-  while (quiet < quietMs) {
-    await sleep(50)
-    if (mock.calls.length === last) quiet += 50
-    else { last = mock.calls.length; quiet = 0 }
-  }
-}
-
 function fakePng(w, h, salt = 0) {
   const b = Buffer.alloc(64 + salt)
   b[0] = 0x89; b[1] = 0x50; b[2] = 0x4e; b[3] = 0x47
@@ -48,6 +34,7 @@ async function brain({ preset, text, images, callTool }) {
   if (/^【私聊/.test(text) && text.includes('表情改名测试')) { const m = text.match(/把「(.+?)」/); const r = await callTool('qq_edit_sticker', { sticker: m[1], new_name: '改过的名字', tags: ['开心'] }); return r.message }
   if (/^【私聊/.test(text) && text.includes('表情删除测试')) { const r = await callTool('qq_edit_sticker', { sticker: '改过的名字', delete: true }); return r.message }
   if (/^【私聊/.test(text) && text.includes('翻聊天记录')) { const r = await callTool('qq_chat_history', { count: 5 }); return r.message.split('\n')[0] }
+  if (text.includes('查看QQ资料测试')) { const r = await callTool('qq_get_profile', {}); return r?.ok ? '资料查到了' : r ? r.message : '没这个工具' }
   if (text.includes('改昵称测试')) { const r = await callTool('qq_set_nickname', { name: '小鲸鱼' }); return r ? r.message : '没这个工具' }
   if (text.includes('改签名测试')) { const r = await callTool('qq_set_signature', { text: '今天也要开心' }); return r ? r.message : '没这个工具' }
   if (text.includes('换头像测试')) { const r = await callTool('qq_set_avatar', { image: 'https://example.com/a.png' }); return r ? r.message : '没这个工具' }
@@ -423,15 +410,14 @@ test('听语音：收到语音先转文字再交给她', async () => {
 })
 
 test('空间日记：手动写一篇（仅自己可见），不往聊天里发，然后删除', async () => {
-  await settle() // 上一个用例的回复可能还没发完，别算到日记头上
-  const before = mock.calls.filter((c) => c.action.startsWith('send_') && c.action.endsWith('_msg') && c.action !== 'send_qzone_msg').length
-  const r = (await fake.call('/diary/run', { visibility: 'self' })).json()
+  // 只检查日记这次调用产生的投递，前一条私聊可能仍在异步发送。
+  const { result, sent } = await api.hub.capture(() => fake.call('/diary/run', { visibility: 'self' }))
+  const r = result.json()
   assert.equal(r.ok, true, r.message)
   const q = mock.sent('send_qzone_msg')[0]
   assert.equal(q.params.ugc_right, 64)
   assert.match(q.params.content, /白米饭/)
-  const after = mock.calls.filter((c) => c.action.startsWith('send_') && c.action.endsWith('_msg') && c.action !== 'send_qzone_msg').length
-  assert.equal(after, before, '日记那一轮没转发到聊天里')
+  assert.deepEqual(sent, [], '日记那一轮没转发到聊天里')
   const d = (await fake.call('/qzone/delete', { tid: r.tid })).json()
   assert.equal(d.ok, true)
   assert.equal(mock.qzone.size, 0)
@@ -638,4 +624,26 @@ test('#6 改资料：群里默认没有这些工具；调成「所有人」后�
   assert.equal(c.result.message, 'no such tool')
   assert.equal(mock.sent('set_qq_profile').length, n + 1)
   await fake.call('/save', { profilePerms: { qqNickname: 'owner' } })
+})
+
+test('主人私聊可以查询最新 QQ 资料，关闭资料模块后查询工具撤销', async () => {
+  const expected = { ...mock.state.selfProfile }
+  mock.push(priv(OWNER, text('查看QQ资料测试')))
+  const c = await lastCall('查看QQ资料测试')
+  assert.equal(c.result.ok, true)
+  assert.equal(c.result.profile.nickname, expected.nickname)
+  assert.equal(c.result.profile.signature, expected.long_nick)
+  assert.equal(mock.sent('get_stranger_info').at(-1).params.no_cache, true)
+  assert.match(fake.variables.get('aurabot_rules_private')(), /qq_get_profile/)
+  assert.doesNotMatch(fake.variables.get('aurabot_rules_social')(), /qq_get_profile/)
+  try {
+    await fake.call('/save', { modules: { profile: { enabled: false } } })
+    await until(() => !api.modules.use('profile'))
+    assert.doesNotMatch(fake.variables.get('aurabot_rules_private')(), /qq_get_profile/)
+    mock.push(priv(OWNER, text('查看QQ资料测试 模块关闭')))
+    const unavailable = await lastCall('模块关闭')
+    assert.equal(unavailable.result.message, 'no such tool')
+  } finally {
+    await fake.call('/save', { modules: { profile: { enabled: true } } })
+  }
 })
