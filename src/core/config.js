@@ -4,6 +4,7 @@ import { dataDir, readJson, writeJson } from './store.js'
 import { DEFAULT_GROUP_POLICY } from '../chat/group-policy.js'
 import { LEVELS, PROFILE_PERM_KEYS, PROFILE_PERM_LEVELS, profilePermDefault } from '../chat/access.js'
 import { normalizeChatModels } from '../chat/chat-model.js'
+import { DIARY_AUDIENCES } from '../features/qzone-audience.js'
 
 export const DEFAULTS = {
   enabled: false, // 总开关：关着一句都不发
@@ -107,7 +108,8 @@ export const DEFAULTS = {
     minGapMinutes: 180,
     minChars: 60,
     maxChars: 140,
-    visibility: 'all', // all | self（仅自己可见）
+    visibility: 'all', // all | friends | selected | self | excluded，和 QQ 空间自身的可见范围一致
+    audienceQQs: '', // selected / excluded 时可见（或不可见）的好友 QQ 号，换行或逗号分隔
   },
   // 本地接口：数据目录 local/ 里的脚本接管这几项（文件要在、开关要开）
   local: { tts: false, image: false, song: false, asr: false },
@@ -280,7 +282,8 @@ export function normalize(raw) {
   c.diary.minGapMinutes = num(c.diary.minGapMinutes, 180, 0, 1440)
   c.diary.minChars = num(c.diary.minChars, 60, 10, 500)
   c.diary.maxChars = num(c.diary.maxChars, 140, 20, 1000)
-  c.diary.visibility = c.diary.visibility === 'self' ? 'self' : 'all'
+  c.diary.visibility = DIARY_AUDIENCES.includes(c.diary.visibility) ? c.diary.visibility : 'all'
+  c.diary.audienceQQs = qqList(c.diary.audienceQQs).slice(0, 200).join('\n')
   c.speakUp.idleMinutes = num(c.speakUp.idleMinutes, 40, 5, 1440)
   c.speakUp.nudge = bool(c.speakUp.nudge, true)
   c.speakUp.minIntervalMinutes = num(c.speakUp.minIntervalMinutes, 90, 5, 1440)

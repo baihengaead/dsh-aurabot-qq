@@ -2,8 +2,7 @@
 
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { fetchImage } from '../core/net.js'
-
-const RIGHT = { all: 1, friends: 4, self: 64 }
+import { resolveAudience } from './qzone-audience.js'
 
 const toMin = (hhmm) => {
   const [h, m] = String(hhmm).split(':').map(Number)
@@ -37,11 +36,13 @@ export function createQzone({ getConfig, onebot, hub, log, onDiary }) {
     const cfg = getConfig()
     const text = String(content || '').trim()
     if (!text) return { ok: false, message: '说说是空的' }
-    const right = RIGHT[visibility || cfg.diary.visibility] || 1
+    // 面板定的范围说了算；单次请求只能收窄成「仅自己」，不能扩大。
+    let audience
+    try { audience = resolveAudience(cfg, visibility) } catch (error) { return { ok: false, message: error.message } }
     if (!cfg.enabled) return { ok: false, message: '总开关关着' }
     if (cfg.dryRun) {
-      log.info(`试运行：本来要发说说（${visibility || cfg.diary.visibility}）：${text.slice(0, 60)}`)
-      return { ok: true, tid: '', dryRun: true }
+      log.info(`试运行：本来要发说说（${audience.label}）：${text.slice(0, 60)}`)
+      return { ok: true, tid: '', dryRun: true, visibility: audience.visibility, label: audience.label, target_uins: audience.target_uins || [] }
     }
     const imgs = []
     for (const src of images) {
@@ -52,10 +53,14 @@ export function createQzone({ getConfig, onebot, hub, log, onDiary }) {
       }
     }
     try {
-      const r = await onebot.call('send_qzone_msg', { content: text, ugc_right: right, ...(imgs.length ? { images: imgs } : {}) }, { timeoutMs: 60000 })
+      // 下载图片可能花几秒，发布前用最新配置再算一次，免得中途改了范围还按旧的发出去。
+      const latest = getConfig()
+      audience = resolveAudience(latest, visibility)
+      if (!latest.enabled || latest.dryRun) return { ok: false, message: '发布前开关已变化，本次未发布。' }
+      const r = await onebot.call('send_qzone_msg', { content: text, ugc_right: audience.ugc_right, ...(audience.target_uins ? { target_uins: audience.target_uins } : {}), ...(imgs.length ? { images: imgs } : {}) }, { timeoutMs: 60000 })
       const tid = String(r?.tid ?? r?.id ?? r ?? '')
-      log.info(`发了一条说说（tid ${tid || '?'}）`)
-      return { ok: true, tid }
+      log.info(`发了一条说说（${audience.label}，tid ${tid || '?'}）`)
+      return { ok: true, tid, visibility: audience.visibility, label: audience.label, target_uins: audience.target_uins || [] }
     } catch (error) {
       log.warn('发说说失败：', error.message)
       return { ok: false, message: error.message }
@@ -63,7 +68,59 @@ export function createQzone({ getConfig, onebot, hub, log, onDiary }) {
   }
 
   async function remove(tid) {
-    return onebot.call('delete_qzone_msg', { tid: String(tid) })
+    tid = String(tid || '').trim()
+    if (!tid) throw new Error('缺少说说 ID')
+    const result = await onebot.call('delete_qzone_msg', { tid })
+    const s = state()
+    let changed = false
+    for (const entry of s.history) {
+      if (String(entry.tid) === tid) {
+        entry.deletedAt = Date.now()
+        changed = true
+      }
+    }
+    if (changed) save(s)
+    return result
+  }
+
+  // 空间里的删除不一定经过本插件（手机上删、被系统删），所以定期拿空间列表和本地记录对账。
+  // 只有完整读完列表才敢把缺失的记录判成“已删除”，读不全就只返回提示，绝不动数据。
+  let syncingHistory = null
+  function syncHistory() {
+    if (syncingHistory) return syncingHistory
+    syncingHistory = (async () => {
+      if (!state().history.some((d) => d.tid && d.ok && !d.dryRun && !d.deletedAt)) return { ok: true }
+      try {
+        const startedAt = Date.now()
+        const ids = new Set()
+        let total = null
+        let complete = false
+        for (let pos = 0; pos < 1000; pos += 100) {
+          const page = await onebot.call('get_qzone_msg_list', { pos, num: 100 }, { timeoutMs: 12000 })
+          if (!Array.isArray(page?.msglist) || !Number.isInteger(page.total) || page.total < 0) throw new Error('空间列表格式不完整')
+          if (total !== null && total !== page.total) throw new Error('空间列表正在变化，请稍后刷新')
+          total = page.total
+          for (const item of page.msglist) {
+            if (!item?.tid) throw new Error('空间列表缺少说说 ID')
+            ids.add(String(item.tid))
+          }
+          if (ids.size >= total) { complete = true; break }
+          if (page.msglist.length < 100) break
+        }
+        const s = state()
+        const checkedAt = Date.now()
+        for (const entry of s.history) {
+          if (!entry.tid || !entry.ok || entry.dryRun || entry.deletedAt || entry.at > startedAt) continue
+          if (ids.has(String(entry.tid))) entry.remoteCheckedAt = checkedAt
+          else if (complete) { entry.deletedAt = checkedAt; entry.deletedSource = 'space-list' }
+        }
+        save(s)
+        return { ok: true, ...(complete ? {} : { warning: '空间列表未完整读取，未将缺失记录判定为已删除。' }) }
+      } catch (error) {
+        return { ok: false, warning: '未能核对空间状态：' + error.message + '；保留原有记录。' }
+      }
+    })().finally(() => { syncingHistory = null })
+    return syncingHistory
   }
 
   function todayExcerpt(maxLines = 60) {
@@ -80,6 +137,8 @@ export function createQzone({ getConfig, onebot, hub, log, onDiary }) {
     busy = true
     try {
       const cfg = getConfig().diary
+      // 名单/范围不合法就别让模型白写一篇再失败
+      try { resolveAudience(getConfig(), visibility) } catch (error) { return { ok: false, message: error.message } }
       const now = new Date()
       const excerpt = todayExcerpt()
       const prompt = [
@@ -94,7 +153,7 @@ export function createQzone({ getConfig, onebot, hub, log, onDiary }) {
       if (!text || text === '[沉默]') return { ok: false, message: '她这次没写出来' }
       const r = await post(text, { visibility })
       const s = state()
-      s.history.unshift({ at: Date.now(), text, ok: r.ok, tid: r.tid || '', dryRun: Boolean(r.dryRun), visibility: visibility || cfg.visibility, error: r.ok ? '' : r.message })
+      s.history.unshift({ at: Date.now(), text, ok: r.ok, tid: r.tid || '', dryRun: Boolean(r.dryRun), visibility: r.visibility || visibility || cfg.visibility, target_uins: r.target_uins || [], error: r.ok ? '' : r.message })
       s.history = s.history.slice(0, 100)
       save(s)
       if (r.ok && !r.dryRun) {
@@ -137,5 +196,5 @@ export function createQzone({ getConfig, onebot, hub, log, onDiary }) {
     return m === undefined ? '' : `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
   }
 
-  return { post, remove, writeDiary, tick, history: () => state().history, nextTime }
+  return { post, remove, writeDiary, tick, syncHistory, history: () => state().history, nextTime }
 }

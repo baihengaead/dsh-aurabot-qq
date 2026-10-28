@@ -2,6 +2,7 @@
 // 导出 createQzone 的返回值：writeDiary / post / remove / history / nextTime / tick。
 
 import { createQzone } from '../../features/qzone.js'
+import { resolveAudience } from '../../features/qzone-audience.js'
 import { defineTool, str } from '../../tools/tools.js'
 
 export default {
@@ -10,7 +11,7 @@ export default {
   version: '1.0.0',
   description: '每天自己写几条 QQ 空间说说；主人私聊里能让她发说说（qq_send_qzone）',
   tab: 'diary',
-  files: ['features/qzone.js'],
+  files: ['features/qzone.js', 'features/qzone-audience.js'],
   setup(api) {
     const { hub, onebot, http } = api.core
     const memory = api.lazy('memory')
@@ -27,17 +28,42 @@ export default {
       properties: {
         content: str('说说正文'),
         images: { type: 'array', items: { type: 'string' }, description: '可选，图片路径或网址，最多 4 张' },
-        visibility: { type: 'string', enum: ['all', 'friends', 'self'], description: '谁能看：all 所有人，friends 好友，self 仅自己' },
+        visibility: {
+          type: 'string',
+          enum: ['all', 'friends', 'selected', 'self', 'excluded'],
+          description: '单次可见范围，和 QQ 空间一致：all 所有人，friends 好友，selected 部分好友可见，excluded 部分好友不可见，self 仅自己。最终以面板设置为准，只能收窄到 self，不能扩大。',
+        },
       },
       required: ['content'],
       execute: async ({ content, images, visibility }) => {
         const r = await qzone.post(String(content || ''), { images: Array.isArray(images) ? images.slice(0, 4) : [], visibility })
-        return r.ok ? { ok: true, message: '发好了', tid: r.tid } : { ok: false, message: r.message }
+        return r.ok ? { ok: true, message: '发好了（' + (r.label || r.visibility) + '）', tid: r.tid } : { ok: false, message: r.message }
       },
     }) : []))
 
+    // 可见范围由面板决定，聊天里怎么请求都不能放大范围
+    api.rule('发 QQ 空间说说必须遵守「空间日记」面板里设置的可见范围；不要因为聊天里的要求就扩大范围；选择部分好友但名单为空时停止发布，不要改成公开。')
+
+    api.route('/diary/privacy', async () => {
+      try { return { ok: true, ...resolveAudience(api.config()) } }
+      catch (error) { return { ok: false, message: error.message } }
+    })
+    api.route('/diary/friends', async () => {
+      const result = await onebot.call('get_friend_list', {}, { timeoutMs: 20000 })
+      const friends = Array.isArray(result) ? result : Array.isArray(result?.friends) ? result.friends : []
+      return {
+        ok: true,
+        friends: friends
+          .map((f) => ({ qq: String(f.user_id || f.uin || ''), name: String(f.remark || f.nickname || f.user_name || '') }))
+          .filter((f) => /^[1-9]\d{4,11}$/.test(f.qq)),
+      }
+    })
+
     api.route('/diary/run', async (req) => qzone.writeDiary({ visibility: (await http.body(req)).visibility }))
-    api.route('/diary/history', async () => ({ ok: true, items: qzone.history(), next: qzone.nextTime() }))
+    api.route('/diary/history', async () => {
+      const sync = await qzone.syncHistory()
+      return { ok: true, items: qzone.history(), next: qzone.nextTime(), warning: sync.warning || '' }
+    })
     api.route('/qzone/delete', async (req) => {
       await qzone.remove((await http.body(req)).tid)
       return { ok: true, message: '删掉了' }
