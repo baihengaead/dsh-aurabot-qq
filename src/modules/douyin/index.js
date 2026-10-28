@@ -40,12 +40,28 @@ export default {
           execute: guarded('douyinBrowse', ({ link }) => dy.watch(String(link || ''))),
         }))
         tools.push(defineTool({
+          name: 'douyin_recent',
+          description: '查最近刷过的抖音视频及真实链接。有人问刚才刷了什么、要分享或评论刚看过的视频时先用；没有记录就如实说。',
+          properties: {},
+          execute: guarded('douyinBrowse', async () => {
+            const videos = dy.recentVideos()
+            return { ok: true, message: videos.length ? videos.map((v) => `《${v.title || '无标题'}》${v.url}`).join('\n') : '最近没有能找到链接的视频记录', videos }
+          }),
+        }))
+        tools.push(defineTool({
           name: 'douyin_browse',
           description: '现在去刷一会儿抖音推荐，有人让你去刷抖音、找个视频给他时用。只是开始刷：要几分钟，刷完系统会把结果（看了什么、分享了哪个）告诉你，在那之前别说已经分享了 / 已经发了。主人开口要的话，这轮一定会挑一个分享给主人。',
           properties: {},
           execute: guarded('douyinBrowse', async () => dy.browse({ ownerAsked: hub.turnHasOwner(sessionId), report: chat })),
         }))
       }
+      if (profileToolVisible(cfg, 'douyinShareOwner', chat)) tools.push(defineTool({
+        name: 'douyin_share_owner',
+        description: '主人明确要求分享某个抖音视频给自己时用；link 填真实链接或视频 id。发到面板设置的抖音私信、QQ 或两边。',
+        properties: { link: str('抖音视频链接或视频 id') },
+        required: ['link'],
+        execute: guarded('douyinShareOwner', ({ link }) => dy.shareVideo(String(link || ''))),
+      }))
       if (profileToolVisible(cfg, 'douyinLike', chat)) tools.push(defineTool({
         name: 'douyin_like',
         description: '给一个抖音视频点赞。有人明确让你点赞时用。link 填视频链接。',

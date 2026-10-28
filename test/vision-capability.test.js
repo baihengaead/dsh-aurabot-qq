@@ -107,4 +107,16 @@ test('模型支持看图：图片照常交给她', async () => {
   assert.equal(fake.turns.at(-1).images, 1, '支持看图就该拿到图')
 })
 
+test('工具看图能力按当前聊天选的模型判断', async () => {
+  const cfg = api.getConfig()
+  // 使用假宿主模型列表中存在的模型，验证聊天级模型的选择顺序。
+  fake.ctx.llm.resolveModelInfo = async (p, m) => ({ inputModalities: m === 'm-owner' ? ['text', 'image'] : ['text'] })
+  api.setConfig({ ...cfg, model: { provider: 'fake', model: 'fake-1', vision: 'auto' }, chatModels: { ...cfg.chatModels, privateDefault: { provider: 'fake', model: 'm-owner' } } })
+  clearVisionCache()
+  assert.equal(await api.hub.canSeeImages({ kind: 'private', userId: OWNER }), true)
+  assert.equal(await api.hub.canSeeImages({ kind: 'group', groupId: '12345' }), false)
+  api.setConfig({ ...api.getConfig(), model: { provider: 'fake', model: 'fake-1', vision: 'off' } })
+  assert.equal(await api.hub.canSeeImages({ kind: 'private', userId: OWNER }), false)
+})
+
 after(() => fake.dispose())

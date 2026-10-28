@@ -43,6 +43,8 @@ export function shrinkImage(buf, maxSide, ffmpeg, { timeoutMs = 30000 } = {}) {
     const timer = setTimeout(() => { try { proc.kill() } catch (error) {} ; finish(null) }, timeoutMs)
     proc.stdout.on('data', (d) => out.push(d))
     proc.stderr.on('data', () => {}) // 占位，别让管道堵住
+    // ffmpeg 可能在输入写完前退出（坏图、路径不对等）；stdin 的异步错误不能让宿主进程崩溃。
+    proc.stdin.on('error', () => { clearTimeout(timer); try { proc.kill() } catch (error) {} ; finish(null) })
     proc.on('error', () => { clearTimeout(timer); finish(null) })
     proc.on('close', () => { clearTimeout(timer); const b = Buffer.concat(out); finish(b.length ? b : null) })
     try { proc.stdin.end(buf) } catch (error) { finish(null) }

@@ -145,7 +145,7 @@ function setup({ decisions = [], cfgOver = {}, douyinOver = {}, siteOpts = {}, n
   const prompts = []
   const hub = {
     runSystemTurn: async (name, title, prompt) => { prompts.push(prompt); return turn && name === 'douyin-dm' ? turn(prompt) : JSON.stringify(decisions) },
-    sendText: async (chatId, text) => { sent.push([chatId, text]) },
+    sendText: async (chatId, text) => { sent.push([chatId, text]); return { message_id: 1 } },
     pushToSession: async (chat, content) => { pushed.push([chat.chatId, content[0].text]) },
   }
   const pushed = []
@@ -155,7 +155,7 @@ function setup({ decisions = [], cfgOver = {}, douyinOver = {}, siteOpts = {}, n
   const waits = []
   const owners = []
   const dy = duty.createDouyin({ getConfig: () => cfg, setOwner: (o) => { owners.push(o); cfg.douyin.owner = o }, hub, memory, log: { info() {}, warn() {}, debug() {} }, site: fs, wait: async (ms) => { waits.push(ms); onWait(ms) }, ...(now ? { now } : {}) })
-  return { dy, fs, sent, events, prompts, cfg, waits, owners, pushed }
+  return { dy, fs, hub, sent, events, prompts, cfg, waits, owners, pushed }
 }
 
 test('刷一轮：一个个点开看，按视频 id 点赞 / 评论（不会点到别的视频上），在 QQ 上分享给主人，记成她的经历', async () => {
@@ -519,6 +519,63 @@ test('主人亲口让她找视频：今天看满了也照样去刷一轮；自�
   const asked = await dy.run({ force: true, ownerAsked: true })
   assert.equal(asked.ok, true)
   assert.ok(fs.calls.watch.length > 0)
+})
+
+test('最近看过的视频可找回真实链接，并可按链接给主人分享', async () => {
+  const { dy, fs } = setup({ owner: OWNER, decisions: [{ i: 1, feeling: '好看' }] })
+  assert.deepEqual(dy.recentVideos(), [])
+  assert.equal((await dy.run({ force: true })).ok, true)
+  const recent = dy.recentVideos()
+  assert.equal(recent.length, 3)
+  assert.match(recent[0].url, /^https:\/\/www\.douyin\.com\/video\/\d+$/)
+  const result = await dy.shareVideo(recent[0].url)
+  assert.equal(result.ok, true, result.message)
+  assert.deepEqual(result.via, ['douyin'])
+  assert.equal(fs.calls.share.length, 1)
+})
+
+test('分享上限用完时不会绕开限制，主人要求刷视频时明确报告原因', async () => {
+  const { dy, fs } = setup({ owner: OWNER, douyinOver: { caps: { like: 30, comment: 1, share: 0 } } })
+  const result = await dy.shareVideo('https://www.douyin.com/video/7000000000000000001')
+  assert.equal(result.ok, false)
+  assert.match(result.message, /次数用完/)
+  assert.equal(fs.calls.share.length, 0)
+  const browse = await dy.run({ force: true, ownerAsked: true })
+  assert.equal(browse.ok, false)
+  assert.match(browse.message, /分享次数用完/)
+})
+
+test('主人要视频但挑选模型超时：仍分享已看过的视频，不点赞评论', async () => {
+  const { dy, fs, hub } = setup({ owner: OWNER })
+  hub.runSystemTurn = async () => { throw new Error('等太久了') }
+  const result = await dy.run({ force: true, ownerAsked: true })
+  assert.equal(result.ok, true)
+  assert.equal(result.shared, 1)
+  assert.equal(fs.calls.share.length, 1)
+  assert.equal(fs.calls.like.length, 0)
+  assert.equal(fs.calls.comment.length, 0)
+})
+
+test('发送状态不确定或多句发了一部分时不整轮重试', async () => {
+  for (const partial of [false, true]) {
+    const t = Date.now()
+    const chat = [{ id: 'a', uid: '4182', text: '旧的', at: t - 3600_000 }]
+    const { dy, fs } = setup({ owner: OWNER, siteOpts: { chat }, turn: () => partial ? '第一句\n第二句' : '在呢' })
+    await dy.checkOwnerDms()
+    chat.push({ id: 'b', uid: '4182', text: '在吗', at: t })
+    fs.sendDm = async (text) => {
+      if (partial && text === '第一句') { fs.calls.dm.push(text); return }
+      throw Object.assign(new Error('状态不确定'), { code: 'dm_uncertain' })
+    }
+    assert.equal((await dy.checkOwnerDms()).ok, false)
+    assert.equal((await dy.checkOwnerDms()).replied, 0)
+    assert.deepEqual(fs.calls.dm, partial ? ['第一句'] : [])
+  }
+})
+
+test('私信比较忽略表情和空白但不能把半句当完整', () => {
+  assert.equal(site.dmComparable('好呀 👋\n马上去'), site.dmComparable('好呀马上去'))
+  assert.notEqual(site.dmComparable('得令 主人的命令最大'), site.dmComparable('得令 主人的命令最大 我这就去'))
 })
 
 test('私信里让她去刷、却没刷成：在私信里照实跟主人说一声（以前「我这就去翻」之后就没下文了）', async () => {

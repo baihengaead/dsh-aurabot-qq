@@ -14,6 +14,16 @@ const NOT_LOGIN = new Set([8, 2190008])
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
 const clean = (t, max = 300) => [...String(t ?? '').replace(/\s+/g, ' ').trim()].slice(0, max).join('')
 
+/** 编辑器可能把 emoji 显示成图片；比较可见文字时保留标点，不能把半句话当完整。 */
+export function dmComparable(text) {
+  return String(text || '').normalize('NFC').replace(/[\s\u00a0\u200b\u200d\ufe0f]|\p{Extended_Pictographic}|\p{Emoji_Modifier}/gu, '')
+}
+
+function dmEqual(actual, expected) {
+  const target = dmComparable(expected)
+  return target ? dmComparable(actual) === target : String(actual || '').trim() === String(expected || '').trim()
+}
+
 /** 从一段文字里认视频：完整链接 / modal_id / 图文 note / v.douyin.com 短链。 */
 export function findAwemeId(text) {
   const s = String(text || '')
@@ -171,7 +181,7 @@ export function createSite({ browser, log }) {
   function checkWrite(r, what) {
     if (!r) throw new Error(`${what}没发出去（没等到抖音的回应）`)
     const h = Object.fromEntries(Object.entries(r.headers || {}).map(([k, v]) => [k.toLowerCase(), v]))
-    if (h['x-tt-verify-passport-decision']) throw Object.assign(new Error(`抖音要求这个号先做身份验证（为保障账号安全），${what}被拦下了`), { code: 'verify' })
+    if (h['x-tt-verify-passport-decision']) throw Object.assign(new Error(`抖音拦下了${what}并返回账号验证标记，网页不一定会显示验证码。请在手机抖音检查账号安全或实名状态，再在面板显示专用浏览器窗口核对；未确认前不要反复重试`), { code: 'verify' })
     if (!r.json) throw new Error(`${what}没发出去（抖音没返回结果）`)
     if (r.json.status_code !== 0) throw Object.assign(new Error(r.json.status_msg || `${what}失败（${r.json.status_code}）`), { code: r.json.status_code })
   }
@@ -429,7 +439,7 @@ export function createSite({ browser, log }) {
         seen.add(id)
         const p = m.parsedContent || {}
         const at = m.createdAt instanceof Date ? m.createdAt.getTime() : Number(m.createdAt) || 0
-        out.push({ id, uid: String(m.sender ?? ''), text: String(p.text || '').slice(0, 500), at, card: p.itemId ? { awemeId: String(p.itemId), title: String(p.content_title || '').slice(0, 80) } : null })
+        out.push({ id, uid: String(m.sender ?? ''), mine: m.isMyMessage === true, text: String(p.text || '').slice(0, 500), at, card: p.itemId ? { awemeId: String(p.itemId), title: String(p.content_title || '').slice(0, 80) } : null })
       }
       return out.sort((a, c) => a.at - c.at)
     })()`).catch(() => [])
@@ -459,13 +469,13 @@ export function createSite({ browser, log }) {
     })()`).catch(() => false)
     if (!ok) throw new Error('私信输入框点不进去')
     // 打完字先核对框里是不是完整的这句（遇到过只发出去半句的），不对就清掉重打一次
-    const norm = (t) => String(t || '').replace(/[\s\u00a0\u200b]+/g, ' ').trim()
     const inBox = () => b.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(DM_EDIT)}); return e ? e.innerText : '' })()`).catch(() => '')
     for (let tries = 0; ; tries++) {
       await b.clearFocused()
       await b.type(text)
       await sleep(400 + Math.random() * 600)
-      if (norm(await inBox()) === norm(text)) break
+      const typed = await inBox()
+      if (dmEqual(typed, text)) break
       if (tries >= 1) { await b.clearFocused().catch(() => {}); throw new Error('私信输入框里的字对不上，没发') }
     }
     const startedAt = Date.now()
@@ -473,25 +483,33 @@ export function createSite({ browser, log }) {
     let resp = b.waitResponse(sent, 8000)
     await b.pressEnter()
     let r = await resp
-    if (!r) {
-      // 回车没发出去：点输入框右边的发送箭头（svg 本身挂着点击，类名里带 publishBtn）
-      const marked = await b.evaluate(`(() => { const s = document.querySelector('[class*="publishBtn"]'); if (!s) return false; s.setAttribute('data-aurabot', 'dm-send'); return true })()`).catch(() => false)
-      if (marked) {
-        resp = b.waitResponse(sent, 8000)
-        await b.press('[data-aurabot="dm-send"]')
-        r = await resp
-      }
-    }
-    // 没等到发送接口的回应，不等于没发出去：看一眼聊天记录里是不是已经有这句了（不然会当成失败、下次又回一遍）
+    // 没等到回执不代表失败，不能再点一次发送（IM 可能自动重发）。
+    // 只认本账号、发送开始之后的新消息；不能拿主人说过的同一句当成功。
     if (!r) {
       await sleep(1500)
-      const mine = (await readChat()).filter((m) => m.at >= startedAt - 60_000 && norm(m.text) === norm(text))
-      if (mine.length) return { ok: true }
+      const mine = (await readChat()).some((m) => m.mine && m.at >= startedAt - 2000 && dmEqual(m.text, text))
+      if (mine) return { ok: true }
+      const remaining = await inBox()
+      // 仍完整留在输入框，且没有新消息：回车没触发发送，可安全点击一次按钮。
+      if (dmEqual(remaining, text)) {
+        const marked = await b.evaluate(`(() => { const s = document.querySelector('[class*="publishBtn"]'); if (!s) return false; s.setAttribute('data-aurabot', 'dm-send'); return true })()`).catch(() => false)
+        if (marked) {
+          const response = b.waitResponse(sent, 8000)
+          await b.press('[data-aurabot="dm-send"]')
+          r = await response
+          if (!r) {
+            await sleep(1500)
+            const confirmed = (await readChat()).some((m) => m.mine && m.at >= startedAt - 2000 && dmEqual(m.text, text))
+            if (confirmed) return { ok: true }
+          }
+        }
+      }
+      if (!r) throw Object.assign(new Error('私信发送状态不确定，已暂停重试，避免重复发送'), { code: 'dm_uncertain' })
     }
-    if (!r || r.status !== 200) {
+    if (r.status !== 200) {
       await b.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(DM_EDIT)}); e && e.focus() })()`).catch(() => {})
       await b.clearFocused().catch(() => {}) // 没发出去的字别留在框里，免得下次接在后面
-      throw new Error('私信没发出去' + (r ? `（HTTP ${r.status}）` : ''))
+      throw new Error(`私信没发出去（HTTP ${r.status}）`)
     }
     return { ok: true }
   }

@@ -97,25 +97,31 @@ export default {
       execute: async ({ prompt, shape }) => {
         if (api.config().imageGen.ownerOnly && !hub.turnSendersAllOwner(sessionId)) return { ok: false, message: '画图只给主人画哦' }
         const buf = await gen.generate(String(prompt || ''), { shape: String(shape || '') })
-        await hub.sendSegments(chat.chatId, [{ type: 'image', data: { file: 'base64://' + buf.toString('base64') } }], `[生图] ${String(prompt).slice(0, 30)}`)
+        const sent = await hub.sendSegments(chat.chatId, [{ type: 'image', data: { file: 'base64://' + buf.toString('base64') } }], `[生图] ${String(prompt).slice(0, 30)}`)
+        if (!sent) return { ok: false, message: '画好了，但没有发到 QQ（请检查试运行和网关）' }
         const saved = saveImage(buf, String(prompt || ''))
         if (saved) api.log.debug(`生图已存盘：${saved}`)
+        try {
+          memory.addEvent?.({ text: `按提示词画了一张图（不一定等于实际画面）：${String(prompt).slice(0, 120)}`, about: chat.kind === 'private' ? chat.userId : '', tags: ['画画'], importance: 0.4 })
+        } catch (error) {
+          api.log.warn('生图已发送，但经历没记下来：', error.message)
+        }
 
         // 「画完自己看一眼」是总开关：关掉就当没视觉能力处理 —— 既不给图，也不调模型看图。
         // 不然会出现「模型能看图、图也塞了、但没描述」的模糊中间态（#37 反馈）。
-        const visual = await gen.canSee()
+        const visual = (await hub.canSeeImages(chat)) === true
         const seeOwn = api.config().imageGen.seeOwn !== false
         const allowLook = visual && seeOwn
         const seen = allowLook ? await gen.look(buf, String(prompt || '')) : ''
 
-        memory.addEvent?.({ text: `画了一张图：${String(prompt).slice(0, 40)}`, about: chat.kind === 'private' ? chat.userId : '', tags: ['画画'], importance: 0.4 })
         // 不把存盘路径告诉她：知道路径她就会自己去读图，绕开「不给看」的开关（图已经发到聊天里了）
         const out = { ok: true, message: drawToolMessage({ seen, visual, seeOwn }) }
         // 图要先缩、再登记成 DSH 附件块 —— 直接塞 base64 会让下一轮请求整轮失败（实测）
         if (allowLook) {
           const img = await gen.toolImage(buf)
           if (img) out.image = img
-          else api.log.debug('这次生图没把图交给模型（缩图/登记失败），只给文字')
+          // 图没给成：如实说没看到，别让她照着提示词编画面细节
+          else out.message = drawToolMessage({ visual: false })
         }
         return out
       },

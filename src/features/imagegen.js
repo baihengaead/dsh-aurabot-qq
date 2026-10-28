@@ -311,35 +311,12 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
   }
 
   /**
-   * 工具结果里要带的那张图：太大的先缩图，再交给 DSH 的附件服务登记成附件块。
-   * ⚠ 必须走附件服务：适配层只认附件块，直接把 base64 塞进工具结果会让下一轮请求整轮失败
-   * （实测 2MB 的图直接塞进去 → "DeepSeek Messages transport failed"，重试 5 次全挂）。
-   * 缩图或登记失败都返回 null —— 只给文字，宁可少给也不要崩。
+   * 工具结果里要带的那张图：直接复用模块级的 imageToolBlock（本地/上游一份实现）。
+   * 缩图大小之类的细节由 imageToolBlock 自己打日志。
    */
   async function toolImage (buf) {
     if (!dsh) return null
-    let data = buf
-    let mediaType = mimeOf(buf)
-    if (buf.length > TOOL_IMAGE_MAX_BYTES) {
-      const ffmpeg = findFfmpeg(getConfig().bili && getConfig().bili.ffmpegPath)
-      const small = ffmpeg ? await shrinkImage(buf, 1024, ffmpeg) : null
-      if (!small) {
-        log.debug(`生图 ${Math.round(buf.length / 1024)}KB 太大又缩不了，工具结果里就不带图了`)
-        return null
-      }
-      log.debug(`工具结果里的图缩到 ${Math.round(small.length / 1024)}KB（原 ${Math.round(buf.length / 1024)}KB）`)
-      data = small
-      mediaType = 'image/jpeg'
-    }
-    const att = dsh.attachments || (typeof dsh.get === 'function' ? dsh.get('attachments') : null)
-    if (!att || typeof att.admitPromptContent !== 'function') return null
-    try {
-      const [block] = await att.admitPromptContent([{ type: 'image', data: data.toString('base64'), mediaType }])
-      if (block && block.type === 'image') return block
-    } catch (error) {
-      log.debug('生图的图登记成附件失败：', error.message)
-    }
-    return null
+    return imageToolBlock(dsh, buf, { ffmpegPath: getConfig().bili && getConfig().bili.ffmpegPath, log })
   }
 
   const enabled = () => {
@@ -357,27 +334,59 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
  * qq_draw_image 工具结果里那句话。三种情况分别说清楚，别让她瞎猜画面里有什么：
  * - 看过（有描述）：把描述带回去
  * - 能看图但「画完自己看一眼」关着：这次没给图，别描述
- * - 模型看不了图：明确说看不了
+ * - 模型看不了图（或图没登记成功）：如实说没看到，别让她照着提示词编画面细节
  *
  * ⚠ 不告诉她文件路径：给了路径她就会自己用文件工具去读图，"不给看"的开关就形同虚设
  *   （图已经发到聊天里了，她不需要路径；图库是给主人看的）。
  */
 export function drawToolMessage ({ seen = '', visual = false, seeOwn = true } = {}) {
   if (seen) return `画好发出去了。你自己看到的画面：${seen}`
-  if (!visual) return '画好发出去了。你现在的模型看不了图，别描述画面里有什么'
+  if (!visual) return '画好发出去了，但这次没能把图片交给你看；别描述画面里有什么'
   if (!seeOwn) return '画好发出去了。这次没把图给你看，别描述画面里有什么'
   return '画好发出去了'
 }
 
 /**
  * qq_draw_image 的工具结果怎么渲染：一行文字 +（有图时）image 块。
- * image 一般是 DSH 附件块（toolImage() 登记过的），原样透传；没图就只回文字。
+ * image 一般是 DSH 附件块（imageToolBlock() 登记过的），原样透传；没图就只回文字。
  */
 export function drawResultBlocks (_args, value) {
   const text = value && value.ok === false ? '✗ ' + (value.message || '没成功') : (value && value.message) || '✓'
   const blocks = [{ type: 'text', text }]
   const img = value && value.image
-  if (img && (img.attachment || img.data)) blocks.push({ ...img, type: 'image' })
+  if (img && img.attachment) blocks.push({ ...img, type: 'image' })
   return blocks
 }
 
+/**
+ * 工具结果里要带的那张图：太大的先缩图，再交给 DSH 的附件服务登记成附件块。
+ * ⚠ 必须走附件服务：模型适配层只认附件块，把 base64 直接塞进工具结果会让下一轮请求整轮失败
+ * （实测 2MB 的 PNG 直接塞进去 → "DeepSeek Messages transport failed"，重试 5 次全挂）。
+ * 缩图或登记失败都返回 null —— 只给文字，宁可少给也不要崩。
+ */
+export async function imageToolBlock (dsh, buf, { ffmpegPath = '', maxSide = 1024, maxBytes = TOOL_IMAGE_MAX_BYTES, log = null } = {}) {
+  if (!dsh) return null
+  let data = buf
+  let mediaType = mimeOf(buf)
+  if (buf.length > maxBytes) {
+    const ffmpeg = findFfmpeg(ffmpegPath)
+    const small = ffmpeg ? await shrinkImage(buf, maxSide, ffmpeg) : null
+    if (!small || small.length > maxBytes) {
+      log?.debug?.(`生图 ${Math.round(buf.length / 1024)}KB 太大又缩不了，工具结果里就不带图了`)
+      return null
+    }
+    log?.debug?.(`工具结果里的图缩到 ${Math.round(small.length / 1024)}KB（原 ${Math.round(buf.length / 1024)}KB）`)
+    data = small
+    mediaType = 'image/jpeg'
+  }
+  const att = dsh.attachments || (typeof dsh.get === 'function' ? dsh.get('attachments') : null)
+  if (!att || typeof att.admitPromptContent !== 'function') return null
+  try {
+    const [block] = await att.admitPromptContent([{ type: 'image', data: data.toString('base64'), mediaType }])
+    if (block && block.type === 'image' && block.attachment) return block
+    log?.debug?.('宿主没把图登记成附件块，工具结果里不带图')
+  } catch (error) {
+    log?.debug?.('生图的图登记成附件失败：', error.message)
+  }
+  return null
+}

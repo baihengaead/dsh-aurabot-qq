@@ -64,6 +64,11 @@ export function apply(ctx) {
     if (disposed) throw new Error('Aurabot 插件已卸载')
     const before = cfg
     cfg = saveConfig(next)
+    // 改机器人号后旧连接的核对结果立刻失效，必须重新核对才能处理消息或完成向导。
+    if (before.botQQ !== cfg.botQQ) {
+      wrongAccount = ''
+      if (onebotState === 'connected') onebot.restart()
+    }
     secrets()
     if (bridge && before.bridge.dshTools !== cfg.bridge.dshTools) bridge.refresh()
     if (mods && (JSON.stringify(before.modules) !== JSON.stringify(cfg.modules) || before.safeMode !== cfg.safeMode)) mods.sync().catch(() => {})
@@ -538,8 +543,10 @@ export function apply(ctx) {
   // 控制台密码：看一眼（打开 SnowLuma 自己的控制台要用）、自己设一个
   route('/snowluma/password', async () => ({ ok: true, password: snowluma.password(), auto: cfg.snowluma.passwordAuto }))
   route('/snowluma/set-password', async (req) => snowluma.setPassword(String((await readBody(req)).password || '')))
-  route('/setup/done', async () => {
-    if (!cfg.botQQ || !cfg.ownerQQ) return { ok: false, message: '先填好机器人 QQ 和你的 QQ' }
+  route('/setup/done', async (req) => {
+    const body = await readBody(req)
+    if (!cfg.botQQ || !cfg.ownerQQ || cfg.botQQ === cfg.ownerQQ) return { ok: false, message: '先填好不同的机器人 QQ 和你的 QQ' }
+    if (body.existingConnection && !(cfg.enabled && onebotState === 'connected' && loginOk)) return { ok: false, message: 'QQ 网关还没通过机器人号核对，请先连接并核对后再进入面板' }
     setConfig({ ...cfg, setupDone: true })
     log.info('首次使用向导完成')
     return { ...(await overview()), message: '设置完成，大肥鱼可以上线啦' }

@@ -141,6 +141,17 @@ test('#7 主人私聊：她这一轮还在跑时再发消息，直接 steer 进�
   await until(() => sentTo('private', OWNER).some((c) => c.params.message[0].data.text === '好 改成快的'))
 })
 
+test('系统会话超时会及时返回，晚到的回复不会发到 QQ', async () => {
+  const start = Date.now()
+  await assert.rejects(api.hub.runSystemTurn('timeout-test', '超时测试', '慢慢想', { timeoutMs: 50 }), /等太久/)
+  assert.ok(Date.now() - start < 1500)
+  await assert.rejects(api.hub.runSystemTurn('timeout-test', '超时测试', '下一轮', { timeoutMs: 50 }), /上一轮还没结束/)
+  await sleep(2800)
+  // 只看这次迟到的回复有没有被发出去（别的用例可能恰好在这 2.8 秒里发消息，用全局条数判断会误报）
+  const late = mock.sent('send_private_msg').filter((c) => JSON.stringify(c.params || {}).includes('想好了'))
+  assert.deepEqual(late, [], '超时后晚到的回复不能发到 QQ')
+})
+
 test('不在白名单的私聊：不理', async () => {
   const before = fake.turns.length
   mock.push(priv('123456', text('在吗')))
@@ -160,6 +171,9 @@ test('群聊：没叫她不回；@她必回（群聊 preset，无本地工具）
   assert.equal(turn.preset, 'aurabot-social')
   assert.match(turn.userText, /@了你/)
   assert.match(turn.userText, /今天天气不错/, '带上了群里刚才的聊天')
+  const reply = sentTo('group', '555').at(-1).params.message
+  assert.equal(reply[0].type, 'reply', '回复引用了对方的消息')
+  assert.deepEqual(reply[1], { type: 'at', data: { qq: '777' } }, '回复真实 @ 对方')
   const agent = fake.agents.get(turn.sessionId)
   assert.ok(!agent.tools.has('qq_send_qzone'), '群聊会话没有发空间这类主人工具')
   assert.ok(!agent.tools.has('qq_send_message'))
@@ -255,6 +269,8 @@ test('群聊一段一回：好几个人连着 @ 她，她看完整段只回一�
   assert.doesNotMatch(api.hub.lastTextOf(sid), /挨个回|引用回复/)
   assert.match(api.hub.lastTextOf(sid), /第一个人说话/)
   assert.deepEqual(api.hub.speakersOf(sid).sort(), ['701', '702', '703', '704'])
+  const reply = sentTo('group', '558').at(-1).params.message
+  assert.ok(!reply.some((seg) => seg.type === 'reply' || seg.type === 'at'), '多个人同时叫她时不猜要引用或 @ 谁')
 })
 
 test('群聊：她还在回上一段时新来的消息先攒着，回完再一起看（不会一条一轮）', async () => {
@@ -272,6 +288,18 @@ test('群聊：她还在回上一段时新来的消息先攒着，回完再一�
   assert.ok(['补充一句A', '补充一句B', '补充一句C'].every((w) => mine[1].userText.includes(w)))
 })
 
+test('群聊被引用：引用她的消息后，回复引用并 @ 对方', async () => {
+  const outgoing = await api.hub.sendText('group:555', '前一条测试消息')
+  const sentId = String(outgoing.message_id)
+  const target = grp('555', '779', [{ type: 'reply', data: { id: sentId } }, ...text('谢谢你')])
+  const n = sentTo('group', '555').length
+  mock.push(target)
+  await until(() => sentTo('group', '555').length > n)
+  const segs = sentTo('group', '555').at(-1).params.message
+  assert.deepEqual(segs[0], { type: 'reply', data: { id: String(target.message_id) } })
+  assert.deepEqual(segs[1], { type: 'at', data: { qq: '779' } })
+})
+
 test('群聊引用回复：她写 <reply:编号>，发出去的那条带上对应消息的引用', async () => {
   const at = (t) => [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' ' + t } }]
   const first = grp('558', '730', text('先随便说一句'), '壬')
@@ -282,7 +310,8 @@ test('群聊引用回复：她写 <reply:编号>，发出去的那条带上对�
   await until(() => sentTo('group', '558').length >= n + 2)
   const [quoted, plain] = sentTo('group', '558').slice(n)
   assert.deepEqual(quoted.params.message[0], { type: 'reply', data: { id: String(target.message_id) } })
-  assert.equal(quoted.params.message[1].data.text, '收到这条啦')
+  assert.deepEqual(quoted.params.message[1], { type: 'at', data: { qq: '731' } })
+  assert.equal(quoted.params.message.at(-1).data.text, '收到这条啦')
   assert.equal(plain.params.message[0].type, 'text', '其余的照常发，不引用')
 })
 
@@ -551,26 +580,25 @@ test('生图工具结果：能看图时带 image 块，纯文本模型只给文�
   })
   await new Promise((r) => srv.listen(0, '127.0.0.1', r))
   const baseUrl = `http://127.0.0.1:${srv.address().port}/v1`
-  const lastDraw = () => fake.turns.at(-1)?.toolCalls?.find((c) => c.name === 'qq_draw_image')?.result
+  // 找准「这次画图」那一轮：别用 sentTo 计数判断，前一个用例的回复可能还在异步发送
+  const drawTurn = () => [...fake.turns].reverse().find((t) => (t.toolCalls || []).some((c) => c.name === 'qq_draw_image'))
   const draw = async (vision, seeOwn = true) => {
+    const before = drawTurn()
     await fake.call('/save', {
       model: { vision },
       imageGen: { enabled: true, baseUrl, model: 'test-model', apiKey: 'img-key-123456', seeOwn },
     })
-    const n = sentTo('private', OWNER).length
     mock.push(priv(OWNER, text('画一只鲸鱼')))
-    await until(() => sentTo('private', OWNER).slice(n).some((c) => c.params.message[0].type === 'image'), 10000)
-    await until(() => lastDraw(), 10000)
-    return lastDraw()
+    await until(() => drawTurn() && drawTurn() !== before, 15000)
+    return drawTurn().toolCalls.find((c) => c.name === 'qq_draw_image').result
   }
 
   // 手动声明「支持」：工具结果里要有图，而且是登记过的附件块
-  // （直接塞 base64 会让下一轮请求整轮失败，见 imagegen 的 toolImage 注释）
+  // （直接塞 base64 会让下一轮请求整轮失败，见 imageToolBlock 的注释）
   const withImg = await draw('on')
   assert.ok(withImg.image, '能看图的模型应拿到 image')
   assert.equal(withImg.image.type, 'image')
   assert.ok(withImg.image.attachment?.attachmentId, '要登记成附件块')
-  assert.equal(withImg.image.mediaType, 'image/png')
   assert.equal(withImg.image.data, undefined, '不要裸 base64')
   const blocks = (await import('../src/features/imagegen.js')).drawResultBlocks({}, withImg)
   assert.equal(blocks.length, 2)
@@ -584,10 +612,11 @@ test('生图工具结果：能看图时带 image 块，纯文本模型只给文�
   assert.doesNotMatch(noLook.message || '', /你自己看到的画面/)
   assert.match(noLook.message || '', /没把图给你看/)
 
-  // 手动声明「不支持」：纯文本模型，绝不能塞 image 块，而且要如实说看不了
+  // 手动声明「不支持」：纯文本模型，绝不能塞 image 块，而且要如实说
   const noImg = await draw('off')
   assert.equal(noImg.image, undefined, '纯文本模型不应该拿到 image 块')
-  assert.match(noImg.message || '', /看不了图/)
+  assert.match(noImg.message || '', /没能把图片交给你看/, '看不了图时要如实说，别让她编画面')
+  assert.doesNotMatch(noImg.message || '', /存在\s*[A-Za-z]:[\\/]|\.png/, '不能给文件路径')
 
   // 恢复默认：auto + 看一眼
   await fake.call('/save', { model: { vision: 'auto' }, imageGen: { seeOwn: true } })

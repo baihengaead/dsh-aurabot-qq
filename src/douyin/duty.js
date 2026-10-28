@@ -73,7 +73,7 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
     const qq = getConfig().ownerQQ
     if (qq && s.notifiedDay !== s.pauseDay) {
       s.notifiedDay = s.pauseDay
-      Promise.resolve(hub.sendText?.(`private:${qq}`, `抖音那边要验证 / 被限制了，今天我先不点赞评论了：${s.pauseReason}。要验证的话在面板「抖音」页点「显示浏览器窗口」处理一下。`)).catch(() => {})
+      Promise.resolve(hub.sendText?.(`private:${qq}`, `抖音那边要验证 / 被限制了，今天我先不点赞评论了：${s.pauseReason}。请在手机抖音检查账号安全或实名状态；也可以在面板「抖音」页点「显示浏览器窗口」查看。`)).catch(() => {})
     }
   }
 
@@ -184,8 +184,9 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
     }
     if (g.ownerQQ && (mode === 'qq' || mode === 'both' || !via.length)) {
       try {
-        await hub.sendText(`private:${g.ownerQQ}`, `${text}\n${videoLink(v.awemeId)}`)
-        via.push('qq')
+        const sent = await hub.sendText(`private:${g.ownerQQ}`, `${text}\n${videoLink(v.awemeId)}`)
+        if (sent || g.dryRun) via.push('qq')
+        else log.warn('QQ 上分享抖音视频失败：网关没有确认发送')
       } catch (error) {
         log.warn('QQ 上分享抖音视频失败：', error.message)
       }
@@ -271,9 +272,16 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
       const atRule = atLeft
         ? ` 特别想让${owner()}看到的，把 "at" 设成 true 并写 comment：系统会在评论里真的 @${owner()}（${owner()}会收到抖音通知），comment 里别自己打 @。这次最多 @ ${atLeft} 次。`
         : ''
-      const out = await think(`你在抖音刷到了这几个视频：\n\n${looked.map((x, i) => `【${i + 1}】${digestOf(x.v, x.comments)}`).join('\n\n')}\n\n` +
+      let out = ''
+      try {
+        out = await think(`你在抖音刷到了这几个视频：\n\n${looked.map((x, i) => `【${i + 1}】${digestOf(x.v, x.comments)}`).join('\n\n')}\n\n` +
         `看完说说你的想法。对每个视频给一个对象：{"i":序号, "feeling":"一句你的真实感受", "like":true/false, "comment":"想在视频下发的评论（像普通观众，一两句、别打广告，不想评就空字符串）", ${atLeft ? '"at":true/false, ' : ''}"share":"想分享给${owner()}时说的话（不想分享就空字符串）", "remember":"值得记住的一件事（没有就空字符串）"}。` +
         `这次最多点赞 ${likeLeft} 个、评论 ${commentLeft} 个、分享 ${shareLeft} 个。${atRule}${shareLeft ? (ownerAsked ? `${owner()}刚才专门让你找视频给他，这轮至少挑一个最合适的写 share，别全空着。` : shareHint()) : ''}只输出 JSON 数组。`)
+      } catch (error) {
+        if (!ownerAsked || !shareLeft) throw error
+        // 主人明确要视频，模型挑选超时也别让已看完的一轮白费；后面只走已有的单视频兜底。
+        log.warn('挑视频的模型没回，改从已经看过的视频里挑一个：', error.message)
+      }
       const decisions = pickJson(out, [])
       const byI = new Map((Array.isArray(decisions) ? decisions : []).map((d) => [Number(d?.i) || 0, d]))
 
@@ -334,6 +342,10 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
         save(s)
       }
 
+      if (ownerAsked && !shared) {
+        s.lastSkipReason = shareLeft ? '分享未确认成功' : '今天的分享次数用完了，或分享权限已关闭'
+        return { ok: false, message: s.lastSkipReason, watched: looked.length, liked, commented, shared, sharedList }
+      }
       if (!force) {
         s.runs++
         s.nextDueAt = now() + Math.round(c.intervalHours * 3600_000 * (0.8 + Math.random() * 0.5))
@@ -352,6 +364,20 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
       save(s)
       busy = false
     }
+  }
+
+  /** 最近真正看过的视频：从已有记录按视频 id 去重；没有 id 的旧记录不编造链接。 */
+  function recentVideos(limit = 10) {
+    const seen = new Set()
+    const out = []
+    for (const item of load().history) {
+      const id = String(item.awemeId || '')
+      if (!['watch', 'look', 'share'].includes(item.kind) || !/^\d{15,}$/.test(id) || seen.has(id)) continue
+      seen.add(id)
+      out.push({ awemeId: id, title: item.title || '', author: item.author || '', url: videoLink(id), at: item.at })
+      if (out.length >= Math.max(1, Math.min(20, Number(limit) || 10))) break
+    }
+    return out
   }
 
   /** 链接 / 短链 / 视频 id → 视频 id。 */
@@ -405,6 +431,29 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
     }
   }
 
+  /** 主人明确要求分享指定视频时，复用相同的额度、收件人核对和分享记录。 */
+  async function shareVideo(link) {
+    const id = await idOf(link)
+    if (!id) return { ok: false, message: '没认出抖音视频链接' }
+    if (busy) return { ok: false, message: '正在刷抖音，等这一轮刷完再说' }
+    busy = true
+    const s = load()
+    try {
+      if (left(s, 'share') <= 0) return { ok: false, message: '今天分享次数用完了' }
+      const readyResult = await ready(s)
+      if (!readyResult.ok) return readyResult
+      const v = await site.detail(id)
+      const text = `${owner()}，你要的这个视频`
+      const result = await shareToOwner(s, v, text)
+      if (!result.ok) return { ok: false, message: '分享没有确认成功，请检查抖音私信和 QQ 网关' }
+      s.share++
+      record(s, { kind: getConfig().dryRun ? 'dry:share' : 'share', awemeId: id, title: v.title, author: v.author, text, via: result.via })
+      return { ok: true, message: `${getConfig().dryRun ? '试运行：本来要分享' : '已分享'}《${v.title || id}》`, via: result.via }
+    } catch (error) {
+      return { ok: false, message: '分享没成功：' + error.message }
+    } finally { save(s); busy = false }
+  }
+
   const likeVideo = (link) => act('like', link)
   async function commentVideo(link, text) {
     const t = clip(text, 100)
@@ -417,9 +466,10 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
     if (!r.ok) return `【系统消息，不是对方说的】你刚才去刷抖音没刷成：${r.message}。照实跟对方说一声。`
     const where = (via) => via.map((x) => (x === 'douyin' ? '抖音私信' : 'QQ')).join('和')
     const shares = (r.sharedList || []).map((x) => `《${x.title}》（发到了${where(x.via)}）`)
+    const recent = recentVideos(5).map((v) => `《${v.title || '无标题'}》${v.url}`).join('；')
     return `【系统消息，不是对方说的】你刚刷完一轮抖音：看了 ${r.watched} 个，点赞 ${r.liked}，评论 ${r.commented}。` +
       (shares.length ? `分享给${owner()}的：${shares.join('、')}。` : `这轮没有分享给${owner()}的视频。`) +
-      '照实跟对方说一两句，别说没做到的事。'
+      (recent ? `最近看过的视频：${recent}。` : '') + '照实跟对方说一两句，别说没做到的事。'
   }
 
   /**
@@ -447,6 +497,8 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
     busy = true
     const s = load()
     let wantBrowse = false
+    let sent = 0
+    let done = () => {}
     try {
       s.lastDmCheck = now()
       const r = await ready(s)
@@ -462,7 +514,7 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
       markSeen(list.map((m) => m.id).filter((id) => !freshIds.has(id)))
       s.dmTries = s.dmTries || {}
       for (const id of freshIds) if ((s.dmTries[id] = (s.dmTries[id] || 0) + 1) > 3) { markSeen([id]); freshIds.delete(id) }
-      const done = () => { markSeen([...freshIds]); for (const id of freshIds) delete s.dmTries[id] }
+      done = () => { markSeen([...freshIds]); for (const id of freshIds) delete s.dmTries[id] }
       if (!s.dmInit) {
         s.dmInit = true
         done()
@@ -483,7 +535,6 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
       text = text.replace(/\[去刷抖音\]/g, '').trim()
       if (!text || isSilence(text)) { done(); return { ok: true, replied: 0 } }
       const lines = text.split(/\n+|\|\|\|/).map((x) => clip(x, 300)).filter(Boolean).slice(0, 3)
-      let sent = 0
       for (const msg of lines) {
         if (getConfig().dryRun) log.info('试运行：本来要在抖音私信里回主人：', msg)
         else await site.sendDm(msg)
@@ -496,6 +547,8 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
       memory?.addEvent?.({ text: `在抖音私信里回了${owner()}：${lines.join(' ').slice(0, 60)}`, tags: ['抖音'], importance: 0.4 })
       return { ok: true, replied: sent }
     } catch (error) {
+      // 发过一部分或发送状态不确定时不整轮重试，避免前半句或整句重复。
+      if (sent > 0 || error.code === 'dm_uncertain') done()
       log.warn('看 / 回主人抖音私信出错：', error.message)
       record(s, { kind: 'error', text: '私信没回成：' + error.message })
       return { ok: false, message: error.message }
@@ -614,5 +667,5 @@ export function createDouyin({ getConfig, setOwner, hub, memory, log, site: inje
     }
   }
 
-  return { run, browse, watch, likeVideo, commentVideo, confirmOwner, checkOwnerDms, tick, account, loginStep, showWindow, state }
+  return { run, browse, watch, recentVideos, shareVideo, likeVideo, commentVideo, confirmOwner, checkOwnerDms, tick, account, loginStep, showWindow, state }
 }
