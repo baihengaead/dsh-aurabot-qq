@@ -236,7 +236,8 @@ export function createSnowLumaManager({ getConfig, log, savePassword }) {
     if (await running()) return { ok: true, message: 'SnowLuma 已经在运行' }
     // 上一轮 DSH 退出时 SnowLuma 可能还没退干净：先看网关/端口，别在端口没释放时硬启
     // （硬启会 bind 失败，变成"WebUI 起来了但 OneBot 没监听"，之后所有消息都发不出去）
-    const ep = readOneBotEndpoint(cfg().dir, cfg().botQQ)
+    // ⚠ botQQ 在配置顶层（snowluma 段里没有），这里要和 endpoint() 用同一个来源
+    const ep = readOneBotEndpoint(cfg().dir, getConfig().botQQ)
     if (await gatewayHealthy(ep)) {
       log.info('检测到还活着的 SnowLuma 网关，直接复用（不再启动第二个实例）')
       return { ok: true, message: 'SnowLuma 已经在跑（直接复用）' }
