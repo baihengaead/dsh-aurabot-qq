@@ -44,6 +44,9 @@ test('imageToolBlock：小图登记成附件块；没附件服务 / 登记失败
   assert.equal(await imageToolBlock({}, buf), null, '没有附件服务 → 不带图')
   assert.equal(await imageToolBlock({ attachments: { admitPromptContent: async () => { throw new Error('nope') } } }, buf), null, '登记失败 → 不带图')
   assert.equal(await imageToolBlock(null, buf), null, '没有 dsh → 不带图')
+  const registered = await imageToolBlock({ attachments: admit({ type: 'image', attachment: { attachmentId: 'att-clean' }, data: 'raw-base64' }) }, buf)
+  assert.equal(registered.attachment.attachmentId, 'att-clean')
+  assert.equal(registered.data, undefined, '有附件时也不能把原始 base64 留在结果里')
 })
 
 test('shrinkImage：没有 ffmpeg 时安静返回 null', async () => {

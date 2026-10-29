@@ -8,11 +8,9 @@ import { randomUUID } from 'node:crypto'
 import { fetchImage } from '../core/net.js'
 import { mimeOf } from '../chat/inbound.js'
 import { askModel, canSeeImages } from '../core/llm.js'
-import { findFfmpeg, findSharp, shrinkImage, shrinkWithSharp } from '../core/img.js'
+import { imageToolBlock } from '../core/img.js'
+export { imageToolBlock }
 import { createCodexAuth } from './codex-auth.js'
-
-// 工具结果里带的图超过这个大小就先缩一下：2MB 的图直接塞进上下文会把下一轮请求搞挂
-const TOOL_IMAGE_MAX_BYTES = 500 * 1024
 
 /** 把模板里的 {占位符} 替换掉；不认识的占位符原样留着。 */
 function fill (tpl, vars) {
@@ -358,39 +356,4 @@ export function drawResultBlocks (_args, value) {
   const img = value && value.image
   if (img && img.attachment) blocks.push({ ...img, type: 'image' })
   return blocks
-}
-
-/**
- * 工具结果里要带的那张图：太大的先缩图，再交给 DSH 的附件服务登记成附件块。
- * ⚠ 必须走附件服务：模型适配层只认附件块，把 base64 直接塞进工具结果会让下一轮请求整轮失败
- * （实测 2MB 的 PNG 直接塞进去 → "DeepSeek Messages transport failed"，重试 5 次全挂）。
- * 缩图或登记失败都返回 null —— 只给文字，宁可少给也不要崩。
- */
-export async function imageToolBlock (dsh, buf, { ffmpegPath = '', maxSide = 1024, maxBytes = TOOL_IMAGE_MAX_BYTES, log = null } = {}) {
-  if (!dsh) return null
-  let data = buf
-  let mediaType = mimeOf(buf)
-  if (buf.length > maxBytes) {
-    const ffmpeg = findFfmpeg(ffmpegPath)
-    let small = ffmpeg ? await shrinkImage(buf, maxSide, ffmpeg) : null
-    // 没装 ffmpeg 时用 DSH 自带的 sharp（libvips），用户不必额外安装
-    if (!small) small = await shrinkWithSharp(await findSharp(), buf, maxSide)
-    if (!small || small.length > maxBytes) {
-      log?.debug?.(`生图 ${Math.round(buf.length / 1024)}KB 太大又缩不了，工具结果里就不带图了`)
-      return null
-    }
-    log?.debug?.(`工具结果里的图缩到 ${Math.round(small.length / 1024)}KB（原 ${Math.round(buf.length / 1024)}KB）`)
-    data = small
-    mediaType = 'image/jpeg'
-  }
-  const att = dsh.attachments || (typeof dsh.get === 'function' ? dsh.get('attachments') : null)
-  if (!att || typeof att.admitPromptContent !== 'function') return null
-  try {
-    const [block] = await att.admitPromptContent([{ type: 'image', data: data.toString('base64'), mediaType }])
-    if (block && block.type === 'image' && block.attachment) return block
-    log?.debug?.('宿主没把图登记成附件块，工具结果里不带图')
-  } catch (error) {
-    log?.debug?.('生图的图登记成附件失败：', error.message)
-  }
-  return null
 }

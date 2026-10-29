@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { mimeOf } from '../chat/inbound.js'
 
 const EXE = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
 
@@ -89,4 +90,43 @@ export function shrinkImage(buf, maxSide, ffmpeg, { timeoutMs = 30000 } = {}) {
     proc.on('close', () => { clearTimeout(timer); const b = Buffer.concat(out); finish(b.length ? b : null) })
     try { proc.stdin.end(buf) } catch (error) { finish(null) }
   })
+}
+
+/**
+ * 工具结果里要带的那张图：太大的先缩图，再交给 DSH 的附件服务登记成附件块。
+ * ⚠ 必须走附件服务：模型适配层只认附件块，把 base64 直接塞进工具结果会让下一轮请求整轮失败
+ * （实测 2MB 的 PNG 直接塞进去 → "DeepSeek Messages transport failed"，重试 5 次全挂）。
+ * 缩图或登记失败都返回 null —— 只给文字，宁可少给也不要崩。
+ */
+export async function imageToolBlock (dsh, buf, { ffmpegPath = '', maxSide = 1024, maxBytes = 500 * 1024, log = null } = {}) {
+  if (!dsh) return null
+  let data = buf
+  let mediaType = mimeOf(buf)
+  if (buf.length > maxBytes) {
+    const ffmpeg = findFfmpeg(ffmpegPath)
+    let small = ffmpeg ? await shrinkImage(buf, maxSide, ffmpeg) : null
+    // 没装 ffmpeg 时用 DSH 自带的 sharp（libvips），用户不必额外安装
+    if (!small) small = await shrinkWithSharp(await findSharp(), buf, maxSide)
+    if (!small || small.length > maxBytes) {
+      log?.debug?.(`图片 ${Math.round(buf.length / 1024)}KB 太大又缩不了，工具结果里就不带图了`)
+      return null
+    }
+    log?.debug?.(`工具结果里的图缩到 ${Math.round(small.length / 1024)}KB（原 ${Math.round(buf.length / 1024)}KB）`)
+    data = small
+    mediaType = 'image/jpeg'
+  }
+  const att = dsh.attachments || (typeof dsh.get === 'function' ? dsh.get('attachments') : null)
+  if (!att || typeof att.admitPromptContent !== 'function') return null
+  try {
+    const [block] = await att.admitPromptContent([{ type: 'image', data: data.toString('base64'), mediaType }])
+    if (block && block.type === 'image' && block.attachment) {
+      const registered = { ...block }
+      delete registered.data // 登记过的附件块不再携带原始 base64。
+      return registered
+    }
+    log?.debug?.('宿主没把图登记成附件块，工具结果里不带图')
+  } catch (error) {
+    log?.debug?.('图片的图登记成附件失败：', error.message)
+  }
+  return null
 }

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import profileModule from '../src/modules/profile/index.js'
 import { createQqProfile } from '../src/features/qq-profile.js'
 import { normalize } from '../src/core/config.js'
+import { startMockOneBot } from './helpers/mock-onebot.js'
 
 const OWNER = '10000001'
 const BOT = '20000002'
@@ -12,14 +13,21 @@ const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a
 
 function setup(overrides = {}) {
   let cfg = normalize({ botQQ: BOT, ownerQQ: OWNER, model: { vision: 'on' }, ...overrides.cfg })
-  const calls = [], rules = [], disposers = []
+  const calls = [], rules = [], disposers = [], sends = [], downloads = [], asks = [], attachments = []
   let allOwner = true, builder
   const state = { nickname: '大肥鱼', long_nick: '爱吃白米饭' }
   const api = {
     config: () => cfg,
-    dsh: overrides.dsh || {},
+    dsh: overrides.dsh || { attachments: { async admitPromptContent(blocks) {
+      attachments.push(...blocks)
+      return blocks.map(({ mediaType }) => ({ type: 'image', attachment: { attachmentId: 'avatar-att' }, mediaType }))
+    } } },
     core: {
-      hub: { turnSendersAllOwner: () => allOwner },
+      hub: { turnSendersAllOwner: () => allOwner, modelFor: () => overrides.model,
+        async sendSegments(chatId, message) {
+          sends.push({ chatId, message })
+          return overrides.sendSegments ? overrides.sendSegments(chatId, message) : { message_id: 55 }
+        } },
       onebot: { async call(action, params, options) {
         calls.push({ action, params, options })
         if (overrides.call) return overrides.call(action, params)
@@ -35,8 +43,11 @@ function setup(overrides = {}) {
     rule: (fn) => rules.push(fn),
     tool: (fn) => { builder = fn },
   }
-  profileModule.setup(api)
-  return { calls, state, rules,
+  profileModule.setup(api, {
+    async fetchAvatar(url, options) { downloads.push({ url, options }); return overrides.fetchAvatar ? overrides.fetchAvatar(url, options) : png },
+    async ask(_dsh, options) { asks.push(options); return '蓝色的小鲸鱼。' },
+  })
+  return { calls, state, rules, sends, downloads, asks, attachments,
     tools: (chat = ownerChat) => Object.fromEntries(builder({ chat, sessionId: 's1' }).map((tool) => [tool.name, tool])),
     set: (patch) => { cfg = normalize({ ...cfg, ...patch }) },
     mixed: () => { allOwner = false },
@@ -63,7 +74,7 @@ function reader(overrides = {}) {
 
 test('仅主人私聊挂查询工具，修改权限关闭也不影响只读查询', async () => {
   const s = setup({ cfg: { profilePerms: { qqNickname: 'off', qqSignature: 'off', qqAvatar: 'off' } } })
-  assert.deepEqual(Object.keys(s.tools()), ['qq_get_profile'])
+  assert.deepEqual(Object.keys(s.tools()), ['qq_get_profile', 'qq_send_avatar'])
   assert.equal(s.tools({ kind: 'private', userId: '30000003' }).qq_get_profile, undefined)
   assert.equal(s.tools({ kind: 'group', userId: OWNER, groupId: '777' }).qq_get_profile, undefined)
   assert.equal(s.tools({ kind: 'system' }).qq_get_profile, undefined)
@@ -236,5 +247,135 @@ test('主动查询规则只在主人私聊规则中出现，要求依据实时�
   assert.match(privateRules, /qq_get_profile/)
   assert.match(privateRules, /主动/)
   assert.match(privateRules, /view_avatar=true/)
+  assert.match(privateRules, /qq_send_avatar/)
+  assert.match(privateRules, /不要.*重复发图/)
   assert.equal(s.rules.map((fn) => fn('social')).join(''), '')
+})
+
+test('查询头像工具返回同一张图的登记附件，render 把图片交给聊天模型且不发送 QQ 消息', async () => {
+  const s = setup(), tool = s.tools().qq_get_profile
+  const result = await tool.execute({ view_avatar: true })
+  assert.equal(result.profile.avatar.attached, true)
+  assert.equal(result.profile.avatar.viewed, true)
+  assert.equal(result.image.attachment.attachmentId, 'avatar-att')
+  assert.equal(result.image.data, undefined)
+  const blocks = tool.output.render({}, result)
+  assert.deepEqual(blocks.map((b) => b.type), ['text', 'image'])
+  assert.equal(s.attachments[0].data, png.toString('base64'))
+  assert.equal(s.asks[0].images[0].data, s.attachments[0].data)
+  assert.equal(s.downloads.length, 1)
+  assert.equal(s.sends.length, 0)
+  assert.deepEqual(tool.output.render({}, { ok: false, message: '拒绝', image: result.image }).map((b) => b.type), ['text'])
+})
+
+test('文字识别失败仍保留实际图片附件；附件失败仍保留文字描述', async () => {
+  const withImage = reader({ dsh: { attachments: { admitPromptContent: async () => [{ type: 'image', attachment: { attachmentId: 'real-avatar' } }] } }, ask: () => { throw new Error('描述超时') } })
+  const a = await withImage.read({ viewAvatar: true })
+  assert.equal(a.profile.avatar.viewed, false)
+  assert.equal(a.profile.avatar.attached, true)
+  assert.equal(a.image.attachment.attachmentId, 'real-avatar')
+  assert.match(a.message, /描述超时/)
+  const noImage = reader({ dsh: { attachments: { admitPromptContent: async () => { throw new Error('不可登记') } } } })
+  const b = await noImage.read({ viewAvatar: true })
+  assert.equal(b.profile.avatar.viewed, true)
+  assert.equal(b.profile.avatar.attached, false)
+  assert.equal(b.image, undefined)
+  assert.match(b.message, /图片未附上/)
+})
+
+test('发送头像工具只给当前主人私聊，修改头像权限关闭也可用', async () => {
+  const s = setup({ cfg: { enabled: true, dryRun: false, profilePerms: { qqAvatar: 'off' } } })
+  const tool = s.tools().qq_send_avatar
+  assert.deepEqual(tool.parameters.properties, {})
+  for (const chat of [{ kind: 'private', userId: '30000003' }, { kind: 'group', userId: OWNER }, { kind: 'system' }]) assert.equal(s.tools(chat).qq_send_avatar, undefined)
+  const r = await tool.execute({ target: 'group:777', avatar_url: 'http://127.0.0.1/private', user_id: '30000003' })
+  assert.equal(r.sent, true)
+  assert.equal(r.messageId, 55)
+  assert.equal(s.sends.length, 1)
+  assert.equal(s.sends[0].chatId, ownerChat.chatId)
+  assert.deepEqual(s.sends[0].message, [{ type: 'image', data: { file: 'base64://' + png.toString('base64') } }])
+  assert.equal(new URL(s.downloads[0].url).searchParams.get('nk'), BOT)
+  assert.equal(s.downloads[0].options.allowLocal, false)
+  assert.equal(s.asks.length, 0)
+})
+
+test('纯文本模型也能发送当前头像；再次发送重新下载当前图片', async () => {
+  let image = png
+  const s = setup({ cfg: { enabled: true, dryRun: false, model: { vision: 'off' } }, fetchAvatar: () => image })
+  const tool = s.tools().qq_send_avatar
+  assert.equal((await tool.execute({})).sent, true)
+  image = Buffer.concat([png, Buffer.from('new-avatar')])
+  assert.equal((await tool.execute({})).sent, true)
+  assert.equal(s.downloads.length, 2)
+  assert.notEqual(s.sends[0].message[0].data.file, s.sends[1].message[0].data.file)
+  assert.equal(s.asks.length, 0)
+  assert.equal(s.attachments.length, 0)
+})
+
+test('试运行、调试、总开关关闭不下载或发送头像', async () => {
+  for (const cfg of [{ enabled: true, dryRun: true }, { enabled: true, debug: true }, { enabled: false, dryRun: false }]) {
+    const s = setup({ cfg }), r = await s.tools().qq_send_avatar.execute({})
+    assert.equal(r.sent, false)
+    assert.equal(s.downloads.length, 0)
+    assert.equal(s.sends.length, 0)
+    if (cfg.enabled) assert.equal(r.simulated, true)
+    else assert.equal(r.ok, false)
+  }
+})
+
+test('发送执行前重新校验主人、本轮身份及模块是否存活', async () => {
+  for (const change of [(s) => s.mixed(), (s) => s.set({ ownerQQ: '30000003' }), (s) => s.dispose()]) {
+    const s = setup({ cfg: { enabled: true, dryRun: false } }), tool = s.tools().qq_send_avatar
+    change(s)
+    const r = await tool.execute({})
+    assert.equal(r.ok, false)
+    assert.equal(s.downloads.length, 0)
+    assert.equal(s.sends.length, 0)
+  }
+})
+
+test('下载等待期间切换账号、主人、模式、模块或总开关，不继续发送', async () => {
+  for (const change of [(s) => s.set({ botQQ: '30000003' }), (s) => s.set({ ownerQQ: '30000003' }), (s) => s.mixed(), (s) => s.set({ debug: true }), (s) => s.set({ enabled: false }), (s) => s.dispose()]) {
+    let release
+    const waiting = new Promise((r) => { release = r })
+    const s = setup({ cfg: { enabled: true, dryRun: false }, fetchAvatar: () => waiting })
+    const work = s.tools().qq_send_avatar.execute({})
+    assert.equal(s.downloads.length, 1)
+    change(s); release(png)
+    const r = await work
+    assert.equal(r.sent, false)
+    assert.equal(s.sends.length, 0)
+  }
+})
+
+test('下载失败、非图片、过大图片和网关未确认不报告发送成功', async () => {
+  for (const fetchAvatar of [() => { throw new Error('下载超时') }, () => Buffer.from('<html>error</html>'), () => Buffer.alloc(2 * 1024 * 1024 + 1)]) {
+    const s = setup({ cfg: { enabled: true, dryRun: false }, fetchAvatar })
+    const r = await s.tools().qq_send_avatar.execute({})
+    assert.equal(r.ok, false)
+    assert.equal(r.sent, false)
+    assert.equal(s.sends.length, 0)
+  }
+  for (const sendSegments of [() => null, () => ({}), () => { throw new Error('网关断开') }]) {
+    const s = setup({ cfg: { enabled: true, dryRun: false }, sendSegments })
+    const r = await s.tools().qq_send_avatar.execute({})
+    assert.equal(r.ok, false)
+    assert.equal(r.sent, false)
+    assert.equal(s.sends.length, 1, '失败后不会额外再发一次')
+  }
+})
+
+test('发送头像经过模拟 OneBot 网关，只有一条真实图片段而不是链接文字', async (t) => {
+  const gateway = await startMockOneBot({ selfId: BOT })
+  t.after(() => gateway.close())
+  const s = setup({ cfg: { enabled: true, dryRun: false }, async sendSegments(chatId, message) {
+    const r = await fetch(gateway.httpUrl + '/send_private_msg', { method: 'POST', headers: { authorization: 'Bearer ' + gateway.token, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: Number(chatId.slice(8)), message }) })
+    return (await r.json()).data
+  } })
+  const r = await s.tools().qq_send_avatar.execute({})
+  assert.equal(r.sent, true)
+  const sent = gateway.sent('send_private_msg')
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].params.user_id, Number(OWNER))
+  assert.deepEqual(sent[0].params.message, [{ type: 'image', data: { file: 'base64://' + png.toString('base64') } }])
 })
